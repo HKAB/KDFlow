@@ -137,6 +137,9 @@ class TeacherRayActor:
             image_data = sum((micro_batch["images"] for micro_batch in batches), [])
         
         persistent_remote = self.strategy.args.kd.teacher_mode == "persistent_remote"
+        protect_loss_hidden_states = (
+            persistent_remote and not self.engine_config.disable_radix_cache
+        )
         generated = self.engine_service.generate(
             input_ids=input_ids,
             loss_masks=unpadded_loss_masks,
@@ -144,6 +147,7 @@ class TeacherRayActor:
             return_hidden_states=True,
             image_data=image_data,
             return_metadata=persistent_remote,
+            protect_loss_hidden_states=protect_loss_hidden_states,
         )
         if persistent_remote:
             hidden_states_list = [item[0] for item in generated]

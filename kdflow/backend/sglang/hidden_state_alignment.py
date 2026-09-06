@@ -10,6 +10,26 @@ from __future__ import annotations
 import numpy as np
 
 
+def loss_mask_start_positions(loss_masks) -> list[int]:
+    """Return the first KD position per sample, or -1 for an empty mask.
+
+    SGLang uses ``logprob_start_len`` as an upper bound for radix-prefix
+    matching. Capping the match at the first required position guarantees that
+    every hidden state selected by the KD loss is recomputed and returned.
+    """
+    starts = []
+    for sample_index, loss_mask in enumerate(loss_masks):
+        mask = np.asarray(loss_mask, dtype=bool)
+        if mask.ndim != 1:
+            raise ValueError(
+                f"Loss mask must be rank 1 for sample {sample_index}, "
+                f"got shape {mask.shape}."
+            )
+        required_positions = np.flatnonzero(mask)
+        starts.append(int(required_positions[0]) if required_positions.size else -1)
+    return starts
+
+
 def select_loss_hidden_states(
     hidden_states: np.ndarray,
     loss_mask: np.ndarray,

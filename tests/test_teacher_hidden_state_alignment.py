@@ -1,7 +1,24 @@
 import numpy as np
 import pytest
 
-from kdflow.backend.sglang.hidden_state_alignment import select_loss_hidden_states
+from kdflow.backend.sglang.hidden_state_alignment import (
+    loss_mask_start_positions,
+    select_loss_hidden_states,
+)
+
+
+def test_loss_mask_start_positions_cap_cache_before_kd_tokens():
+    masks = [
+        np.array([False, False, True, True, False]),
+        np.zeros(4, dtype=bool),
+        np.array([True, False]),
+    ]
+    assert loss_mask_start_positions(masks) == [2, -1, 0]
+
+
+def test_loss_mask_start_positions_reject_non_vector_mask():
+    with pytest.raises(ValueError, match="Loss mask must be rank 1"):
+        loss_mask_start_positions([np.ones((2, 2), dtype=bool)])
 
 
 def test_selects_completion_positions_from_full_hidden_states():

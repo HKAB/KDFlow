@@ -12,7 +12,10 @@ from sglang.srt.entrypoints.engine import Engine as _SglEngine
 from sglang.srt.managers.scheduler import run_scheduler_process as _original_run_scheduler_process
 
 from kdflow.utils.logging_utils import init_logger
-from kdflow.backend.sglang.hidden_state_alignment import select_loss_hidden_states
+from kdflow.backend.sglang.hidden_state_alignment import (
+    loss_mask_start_positions,
+    select_loss_hidden_states,
+)
 
 logger = init_logger(__name__)
 
@@ -148,6 +151,17 @@ def _handle_generate(engine, request, hidden_queue, response_queue):
         "sampling_params": kwargs["sampling_params"],
         "return_hidden_states": kwargs.get("return_hidden_states", True),
     }
+    cache_prefix_limits = None
+    if kwargs.get("protect_loss_hidden_states", False):
+        cache_prefix_limits = loss_mask_start_positions(kwargs["loss_masks"])
+        # In SGLang 0.5.17, logprob_start_len is also the public per-request
+        # upper bound for radix-prefix matching. We discard the logprobs; this
+        # ensures that all KD-required hidden states are newly computed.
+        generate_kwargs.update(
+            return_logprob=True,
+            logprob_start_len=cache_prefix_limits,
+            top_logprobs_num=0,
+        )
     if kwargs.get("image_data") is not None:
         generate_kwargs["image_data"] = kwargs["image_data"]
 
@@ -204,6 +218,8 @@ def _handle_generate(engine, request, hidden_queue, response_queue):
                 hs_np, alignment = select_loss_hidden_states(
                     raw_hidden_states, mask, sample_index=idx
                 )
+                if cache_prefix_limits is not None:
+                    alignment["radix_cache_prefix_limit"] = cache_prefix_limits[idx]
 
             if not hs_np.flags['C_CONTIGUOUS']:
                 hs_np = np.ascontiguousarray(hs_np)
@@ -310,6 +326,7 @@ class SGLangEngineService:
         return_hidden_states: bool = True,
         image_data=None,
         return_metadata: bool = False,
+        protect_loss_hidden_states: bool = False,
     ) -> List[np.ndarray]:
         """Run generation and return hidden states via shared-memory tensors.
         
@@ -321,6 +338,9 @@ class SGLangEngineService:
             return_hidden_states: Whether to return hidden states.
             image_data: Optional list of image data for multimodal models.
             return_metadata: Return ``(hidden_states, metadata)`` per sample.
+            protect_loss_hidden_states: Prevent radix reuse from extending into
+                positions selected by ``loss_masks``. This uses SGLang's public
+                ``logprob_start_len`` cache boundary.
         """
         if not self._started:
             raise RuntimeError("Service not started")
@@ -343,6 +363,7 @@ class SGLangEngineService:
             "loss_masks": loss_masks,
             "sampling_params": sampling_params,
             "return_hidden_states": return_hidden_states,
+            "protect_loss_hidden_states": protect_loss_hidden_states,
         }
         if image_data is not None:
             kwargs["image_data"] = image_data
