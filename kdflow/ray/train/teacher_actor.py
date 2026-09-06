@@ -52,6 +52,13 @@ class TeacherRayActor:
         self.base_gpu_id = base_gpu_id
         self.node_rank = node_rank
         self.teacher_name_or_path = teacher_name_or_path
+        self._radix_forward_calls = 0
+        try:
+            self._radix_log_interval = max(
+                1, int(os.environ.get("KDFLOW_RADIX_LOG_INTERVAL", "100"))
+            )
+        except ValueError:
+            self._radix_log_interval = 100
         
         # Disable tokenizers parallelism to avoid deadlock with multiprocessing
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -152,14 +159,20 @@ class TeacherRayActor:
         if persistent_remote:
             hidden_states_list = [item[0] for item in generated]
             alignments = [item[1]["hidden_state_alignment"] for item in generated]
-            logger.info(
-                "[TeacherRayActor] radix batch: samples=%d, input_tokens=%d, "
-                "returned_prefill_tokens=%d, inferred_cached_prefix_tokens=%d",
-                len(alignments),
-                sum(item["input_length"] for item in alignments),
-                sum(item["returned_length"] for item in alignments),
-                sum(item["inferred_cached_prefix_length"] for item in alignments),
-            )
+            self._radix_forward_calls += 1
+            if (
+                self._radix_forward_calls == 1
+                or self._radix_forward_calls % self._radix_log_interval == 0
+            ):
+                logger.info(
+                    "[TeacherRayActor] radix batch %d: samples=%d, input_tokens=%d, "
+                    "returned_prefill_tokens=%d, inferred_cached_prefix_tokens=%d",
+                    self._radix_forward_calls,
+                    len(alignments),
+                    sum(item["input_length"] for item in alignments),
+                    sum(item["returned_length"] for item in alignments),
+                    sum(item["inferred_cached_prefix_length"] for item in alignments),
+                )
         else:
             hidden_states_list = generated
         

@@ -141,12 +141,13 @@ class SimpleCrossTokenizerKD:
         def teacher_logits_fn(start, end):
             return teacher_lm_head(aligned_teacher_hiddens[start:end])[:, teacher_overlap_ids]
 
+        metric_fns = self.metric_fns if micro_batch.get("_collect_metrics", True) else []
         kd_loss, metric_sums = chunked_loss(
             aligned_student_hiddens, student_lm_head, self.loss_fn,
             student_logits_fn=student_logits_fn,
             teacher_logits_fn=teacher_logits_fn,
             chunk_size=chunk_size, reduction="sum",
-            metric_fns=self.metric_fns, return_metrics=True,
+            metric_fns=metric_fns, return_metrics=True,
         )
         kd_loss = kd_loss / avg_token_num
 

@@ -12,6 +12,18 @@
 # One Ray node, one container, two disjoint placement groups:
 #   4 GPUs: FSDP2 student + sleeping TP1 rollout engines
 #   4 GPUs: persistent TP4 teacher with RadixAttention
+#
+# Safe full run:
+#   sbatch examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+# Ten-step baseline benchmark (long enough to get past warm-up):
+#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-safe \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+# Then test without CPU offload between phases:
+#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-nosleep,ENABLE_SLEEP=False \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+# Only if that fits, test without activation recomputation too:
+#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-fast,ENABLE_SLEEP=False,GRADIENT_CHECKPOINTING=False \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
 KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/experiment/KDFlow"
@@ -22,6 +34,11 @@ RAY_PORT="${RAY_PORT:-6379}"
 
 # Use MAX_SAMPLES=64 for a one-iteration integration test.
 MAX_SAMPLES="${MAX_SAMPLES:-}"
+ENABLE_SLEEP="${ENABLE_SLEEP:-True}"
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
+CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE:-1024}"
+LOGGING_STEPS="${LOGGING_STEPS:-10}"
+RUN_TAG="${RUN_TAG:-dedicated}"
 if [ -n "${MAX_SAMPLES}" ]; then
     NUM_EPOCHS="${NUM_EPOCHS:-1}"
 else
@@ -35,7 +52,7 @@ TEACHER="${TEACHER_REPO}/snapshots/$(cat "${TEACHER_REPO}/refs/main")"
 
 DATA="/mnt/data/users/truongnp5/uv_env/kdflow/data/train.jsonl"
 HF_CACHE="/mnt/data/users/truongnp5/cache/huggingface"
-OUTPUT="/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-dedicated"
+OUTPUT="/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-${RUN_TAG}"
 CKPT="${OUTPUT}/checkpoints"
 WANDB_DIR="${OUTPUT}/wandb"
 TRITON_CACHE_DIR="/tmp/${USER}/triton-${SLURM_JOB_ID}"
@@ -61,6 +78,7 @@ srun --container-image="${CONTAINER}" \
         TRANSFORMERS_CACHE="${HF_CACHE}" \
         HF_DATASETS_CACHE="${HF_CACHE}/datasets" \
         TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 \
+        TRANSFORMERS_VERBOSITY=error RAY_DEDUP_LOGS=1 \
         NCCL_DEBUG=WARN NCCL_IB_DISABLE=0 \
         KDFLOW_ROLLOUT_REGEX_FILE="/mnt/data/users/truongnp5/uv_env/kdflow/config/asr_rollout.regex" \
         KDFLOW_KD_SUPPRESS_TOKEN_IDS="98,100,101" \
@@ -70,6 +88,11 @@ srun --container-image="${CONTAINER}" \
         NODE_IP="${NODE_IP}" RAY_ADDRESS="${RAY_ADDRESS}" RAY_PORT="${RAY_PORT}" \
         STUDENT_GPUS="${STUDENT_GPUS}" TEACHER_GPUS="${TEACHER_GPUS}" \
         NUM_EPOCHS="${NUM_EPOCHS}" MAX_SAMPLES="${MAX_SAMPLES}" \
+        ENABLE_SLEEP="${ENABLE_SLEEP}" \
+        GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING}" \
+        CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE}" \
+        LOGGING_STEPS="${LOGGING_STEPS}" RUN_TAG="${RUN_TAG}" \
+        KDFLOW_RADIX_LOG_INTERVAL=100 \
     bash -s <<'INNER_BASH'
 
 cleanup() {
@@ -111,10 +134,10 @@ python -m kdflow.cli.train_kd_on_policy \
     --prompt_max_len 8192 --generate_max_len 256 --max_len 8448 \
     --train_batch_size 64 --micro_train_batch_size 1 --num_epochs "${NUM_EPOCHS}" \
     --use_dynamic_bsz True --max_token_len_per_gpu 12288 \
-    --chunked_loss_size 1024 \
+    --chunked_loss_size "${CHUNKED_LOSS_SIZE}" \
     --learning_rate 1e-6 --min_lr 1e-8 --lr_warmup_ratio 0.05 \
     --max_norm 1.0 --weight_decay 0.0 --bf16 True \
-    --gradient_checkpointing True \
+    --gradient_checkpointing "${GRADIENT_CHECKPOINTING}" \
     --kd_algorithm vanilla_kd --kd_loss_fn rkl --kd_ratio 1.0 \
     --kd_temperature 1.0 \
     --teacher_mode persistent_remote \
@@ -127,10 +150,10 @@ python -m kdflow.cli.train_kd_on_policy \
     --rollout_batch_size 64 --n_samples_per_prompt 1 \
     --rollout_mem_fraction_static 0.25 \
     --temperature 0.7 --top_p 0.95 --print_rollout_sample False \
-    --enable_sleep True \
-    --logging_steps 5 --use_wandb True --wandb_mode offline \
+    --enable_sleep "${ENABLE_SLEEP}" \
+    --logging_steps "${LOGGING_STEPS}" --use_wandb True --wandb_mode offline \
     --wandb_project gemma4-asr-kd --wandb_group 31b-to-e2b-dedicated \
-    --wandb_run_name "kdflow-${SLURM_JOB_ID}" --wandb_dir "${WANDB_DIR}" \
+    --wandb_run_name "kdflow-${RUN_TAG}-${SLURM_JOB_ID}" --wandb_dir "${WANDB_DIR}" \
     --save_steps 500 --eval_steps -1 --ckpt_path "${CKPT}" \
     --save_path "${OUTPUT}" "${EXTRA_TRAIN_ARGS[@]}"
 

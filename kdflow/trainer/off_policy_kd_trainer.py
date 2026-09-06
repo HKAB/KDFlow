@@ -199,7 +199,14 @@ class OffPolicyKDTrainer:
                 for global_batch in all_global_batches:
                     student_start = time.time()
                     self.global_step += 1
-                    status_list = ray.get(self.student.async_run_distill(global_batch))
+                    collect_metrics = (
+                        self.global_step % self.args.log.logging_steps == 0
+                    )
+                    status_list = ray.get(
+                        self.student.async_run_distill(
+                            global_batch, collect_metrics=collect_metrics
+                        )
+                    )
                     student_step_train_time = time.time() - student_start
                     for k in status_list[0].keys():
                         self.log_state[k].append(sum(s[k] for s in status_list) / len(status_list))

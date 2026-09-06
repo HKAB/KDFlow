@@ -306,7 +306,7 @@ class StudentRayActor:
 
         return micro_batch
 
-    def fit(self, train_data):
+    def fit(self, train_data, collect_metrics=True):
         """
         Train student model with the given data.
         
@@ -325,6 +325,7 @@ class StudentRayActor:
 
         for batch in train_data:
             micro_batch = self._prepare_micro_batch(batch)
+            micro_batch["_collect_metrics"] = collect_metrics
 
             loss_info = self.kd_algorithm.training_step(micro_batch)
             for key in loss_info:
@@ -338,13 +339,11 @@ class StudentRayActor:
                 if projector_params:
                     torch.nn.utils.clip_grad_norm_(projector_params, max_norm=self.args.train.max_norm)
 
-            status["train/grad_norm"].append(
-                torch.nn.utils.clip_grad_norm_(
-                    self.student.parameters(), max_norm=float("inf")
-                ).item()
+            grad_norm = self.strategy.optimizer_step(
+                self.optim, self.student, self.scheduler
             )
-
-            self.strategy.optimizer_step(self.optim, self.student, self.scheduler)
+            if grad_norm is not None:
+                status["train/grad_norm"].append(grad_norm.item())
 
             if self.args.kd.use_ema_teacher and self.strategy.step == 0:
                 self.ema_update()

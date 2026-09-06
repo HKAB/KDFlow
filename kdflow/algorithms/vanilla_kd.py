@@ -88,9 +88,10 @@ class VanillaKD:
         student_label_ids = student_input_ids.roll(shifts=-1, dims=1)[
             student_loss_mask
         ]
-        metric_fns = self.metric_fns
+        collect_metrics = micro_batch.get("_collect_metrics", True)
+        metric_fns = self.metric_fns if collect_metrics else []
         rollout_log_probs = micro_batch.get("rollout_log_probs")
-        if rollout_log_probs is not None:
+        if collect_metrics and rollout_log_probs is not None:
             metric_fns = [
                 *metric_fns,
                 partial(

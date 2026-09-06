@@ -241,19 +241,36 @@ class OnPolicyKDTrainer:
                     self.teacher.sleep()
                 self.log_state["timing/teacher_forward"].append(time.time() - teacher_start)
                 
-                student_start = time.time()
-                
+                student_wakeup_start = time.time()
                 if self.args.train.enable_sleep:
                     self.student.wakeup()
-                
+                self.log_state["timing/student_wakeup"].append(
+                    time.time() - student_wakeup_start
+                )
+
+                student_start = time.time()
+                collect_metrics = (
+                    self.global_step % self.args.log.logging_steps == 0
+                )
                 for global_batch in all_global_batches:
-                    status_list = ray.get(self.student.async_run_distill(global_batch))
+                    status_list = ray.get(
+                        self.student.async_run_distill(
+                            global_batch, collect_metrics=collect_metrics
+                        )
+                    )
                     for k in status_list[0].keys():
                         self.log_state[k].append(sum(s[k] for s in status_list) / len(status_list))
                         
                 self.log_state["timing/student_train"].append(time.time() - student_start)
                 
-                ray.get([actor.empty_cache.remote() for actor in self.student._actor_handlers])
+                empty_cache_start = time.time()
+                ray.get([
+                    actor.empty_cache.remote()
+                    for actor in self.student._actor_handlers
+                ])
+                self.log_state["timing/student_empty_cache"].append(
+                    time.time() - empty_cache_start
+                )
 
                 update_start = time.time()
                 self._sync_rollout_policy()
@@ -270,8 +287,12 @@ class OnPolicyKDTrainer:
                     if self.teacher_sleep_enabled:
                         self.teacher.sleep(tags=["weights"])
                     
+                student_sleep_start = time.time()
                 if self.args.train.enable_sleep:
                     self.student.sleep()
+                self.log_state["timing/student_sleep"].append(
+                    time.time() - student_sleep_start
+                )
 
                 self.log_state["timing/step_time"].append(time.time() - step_start)
                 self.logging()

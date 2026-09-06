@@ -358,18 +358,22 @@ class FSDP2Strategy(ABC):
         model: nn.Module,
         scheduler,
         **kwargs,
-    ) -> None:
+    ):
+        grad_norm = None
         if self.step == 0:
             if self.max_norm > 0.0:
                 if hasattr(model, "clip_grad_norm_"):
-                    model.clip_grad_norm_(self.max_norm)
+                    grad_norm = model.clip_grad_norm_(self.max_norm)
                 else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_norm)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), self.max_norm
+                    )
             
             optimizer.step()
             optimizer.zero_grad()
             if scheduler:
                 scheduler.step()
+        return grad_norm
             
     def load_model(self, model: nn.Module, path: str, map_location="cpu", strict: bool = False, key_replace_fn=None) -> None:
         # For FSDP2, we prefer Distributed Checkpoint (DCP)
