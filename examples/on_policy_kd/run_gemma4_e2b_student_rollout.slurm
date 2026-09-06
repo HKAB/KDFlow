@@ -40,6 +40,7 @@ OUTPUT="/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-remote"
 CKPT="${OUTPUT}/checkpoints"
 WANDB_DIR="${OUTPUT}/wandb"
 TRITON_CACHE_DIR="/tmp/${USER}/triton-${SLURM_JOB_ID}"
+STUDENT_IP="$(hostname -I | awk '{print $1}')"
 
 mkdir -p logs "${OUTPUT}" "${WANDB_DIR}" "${HF_CACHE}/datasets" \
     "${TRITON_CACHE_DIR}"
@@ -74,10 +75,12 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Joining teacher Ray head at ${TEACHER_RAY_ADDRESS}"
+echo "Student Ray node address: ${STUDENT_IP}"
 srun --overlap --container-image="${CONTAINER}" \
     --container-mounts="/mnt/data:/mnt/data" \
     env "${COMMON_ENV[@]}" \
     ray start --address="${TEACHER_RAY_ADDRESS}" \
+        --node-ip-address="${STUDENT_IP}" \
         --num-gpus="${TRAIN_GPUS}" --num-cpus=64 \
         --resources="{\"student_node\": ${TRAIN_GPUS}}" \
         --disable-usage-stats --block &

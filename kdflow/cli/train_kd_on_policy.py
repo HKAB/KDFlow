@@ -33,15 +33,17 @@ def train(args):
 
     # Initialize Ray if not already initialized
     if not ray.is_initialized():
-        ray.init(
-            runtime_env={
-                "env_vars": {
-                    "TOKENIZERS_PARALLELISM": "true",
-                    "NCCL_DEBUG": "WARN"
-                },
-                "working_dir": os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        runtime_env = {
+            "env_vars": {
+                "TOKENIZERS_PARALLELISM": "true",
+                "NCCL_DEBUG": "WARN",
             }
-        )
+        }
+        if args.kd.teacher_mode != "persistent_remote":
+            runtime_env["working_dir"] = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        ray.init(runtime_env=runtime_env)
     
     strategy = get_strategy(args)
     strategy.print(args)
