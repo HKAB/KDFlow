@@ -6,9 +6,12 @@ Run these in order with the same container used for training:
 2. Compare the JSON `request` records for cache enabled and disabled. Send back
    the complete stdout/stderr logs; the useful fields are latency, exact prompt
    LCP, and `metadata.hidden_state_alignment`.
-3. Start `examples/on_policy_kd/run_gemma4_31b_teacher_head.slurm` and copy the
+3. For one 8-GPU worker, run the preferred single-node smoke test:
+   `sbatch --export=ALL,MAX_SAMPLES=64 examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm`.
+4. For two separate workers instead, start
+   `examples/on_policy_kd/run_gemma4_31b_teacher_head.slurm` and copy the
    printed `TEACHER_RAY_ADDRESS` and `TEACHER_HOSTNAME`.
-4. Submit the student smoke test with
+5. Submit the separate student smoke test with
    `sbatch --exclude=<teacher-hostname> --export=ALL,TEACHER_RAY_ADDRESS=<ip>:6379,TEACHER_HOSTNAME=<teacher-hostname>,MAX_SAMPLES=64 examples/on_policy_kd/run_gemma4_e2b_student_rollout.slurm`.
    Remove `MAX_SAMPLES` for the full run.
 
