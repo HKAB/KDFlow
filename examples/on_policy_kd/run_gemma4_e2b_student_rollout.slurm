@@ -9,19 +9,19 @@
 #SBATCH --output=logs/kdflow-e2b-student-%j.out
 #SBATCH --error=logs/kdflow-e2b-student-%j.err
 
-# The 4-GPU FSDP2 student and four TP1 rollout engines share this node. Sleep /
-# wake keeps only the active component resident. The TP4 teacher stays awake on
-# the separately submitted teacher job.
+# Submit with --exclude=<teacher-hostname>. Ray requires the teacher and student
+# raylets to have different node IPs. The student raylet and Python driver run
+# in this single srun container so they share its private /tmp socket namespace.
 
-: "${TEACHER_RAY_ADDRESS:?Submit with --export=ALL,TEACHER_RAY_ADDRESS=<teacher-ip>:6379}"
+: "${TEACHER_RAY_ADDRESS:?Set TEACHER_RAY_ADDRESS=<teacher-ip>:6379}"
+: "${TEACHER_HOSTNAME:?Set TEACHER_HOSTNAME=<teacher-hostname>}"
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
-KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
+KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/experiment/KDFlow"
 EXPECTED_BASE_COMMIT="b83de0f64c5ca404c969e27cea45c6da3ac35485"
 TRAIN_GPUS=4
 TEACHER_GPUS=4
 
-# Use MAX_SAMPLES=64 for a one-iteration smoke test.
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 if [ -n "${MAX_SAMPLES}" ]; then
     NUM_EPOCHS="${NUM_EPOCHS:-1}"
@@ -40,88 +40,77 @@ OUTPUT="/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-remote"
 CKPT="${OUTPUT}/checkpoints"
 WANDB_DIR="${OUTPUT}/wandb"
 TRITON_CACHE_DIR="/tmp/${USER}/triton-${SLURM_JOB_ID}"
+STUDENT_HOSTNAME="$(hostname)"
 STUDENT_IP="$(hostname -I | awk '{print $1}')"
+TEACHER_IP="${TEACHER_RAY_ADDRESS%:*}"
 
-mkdir -p logs "${OUTPUT}" "${WANDB_DIR}" "${HF_CACHE}/datasets" \
-    "${TRITON_CACHE_DIR}"
-test -f "${KDFLOW_SRC}/kdflow/backend/sglang/hidden_state_alignment.py"
-git -C "${KDFLOW_SRC}" merge-base --is-ancestor "${EXPECTED_BASE_COMMIT}" HEAD
+mkdir -p logs "${OUTPUT}" "${WANDB_DIR}" "${HF_CACHE}/datasets"
+test -f "${KDFLOW_SRC}/kdflow/backend/sglang/hidden_state_alignment.py" || exit 1
+git -C "${KDFLOW_SRC}" merge-base --is-ancestor "${EXPECTED_BASE_COMMIT}" HEAD \
+    || exit 1
 if ! grep -q persistent_remote "${KDFLOW_SRC}/kdflow/cli/train_kd_on_policy.py"; then
     echo "ERROR: KDFLOW_SRC does not contain the remote-teacher implementation."
-    echo "Do not copy the old train_kd_on_policy.py override over this tree."
+    exit 2
+fi
+if [ "${STUDENT_HOSTNAME}" = "${TEACHER_HOSTNAME}" ] \
+    || [ "${STUDENT_IP}" = "${TEACHER_IP}" ]; then
+    echo "ERROR: teacher and student jobs landed on the same Ray node/IP."
+    echo "Teacher: ${TEACHER_HOSTNAME} (${TEACHER_IP})"
+    echo "Student: ${STUDENT_HOSTNAME} (${STUDENT_IP})"
+    echo "Resubmit this job with: --exclude=${TEACHER_HOSTNAME}"
     exit 2
 fi
 
-COMMON_ENV=(
-    KDFLOW_SRC="${KDFLOW_SRC}"
-    PYTHONPATH="${KDFLOW_SRC}"
-    HF_HOME="${HF_CACHE}"
-    TRANSFORMERS_CACHE="${HF_CACHE}"
-    HF_DATASETS_CACHE="${HF_CACHE}/datasets"
-    TOKENIZERS_PARALLELISM=false
-    PYTHONUNBUFFERED=1
-    NCCL_DEBUG=WARN
-    NCCL_IB_DISABLE=0
-    KDFLOW_ROLLOUT_REGEX_FILE="/mnt/data/users/truongnp5/uv_env/kdflow/config/asr_rollout.regex"
-    KDFLOW_KD_SUPPRESS_TOKEN_IDS="98,100,101"
-)
+echo "Teacher: ${TEACHER_HOSTNAME} (${TEACHER_RAY_ADDRESS})"
+echo "Student: ${STUDENT_HOSTNAME} (${STUDENT_IP})"
+
+srun --container-image="${CONTAINER}" \
+    --container-mounts="/mnt/data:/mnt/data" \
+    env PYTHONPATH="${KDFLOW_SRC}" HF_HOME="${HF_CACHE}" \
+        TRANSFORMERS_CACHE="${HF_CACHE}" \
+        HF_DATASETS_CACHE="${HF_CACHE}/datasets" \
+        TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 \
+        NCCL_DEBUG=WARN NCCL_IB_DISABLE=0 \
+        KDFLOW_ROLLOUT_REGEX_FILE="/mnt/data/users/truongnp5/uv_env/kdflow/config/asr_rollout.regex" \
+        KDFLOW_KD_SUPPRESS_TOKEN_IDS="98,100,101" \
+        KDFLOW_SRC="${KDFLOW_SRC}" STUDENT="${STUDENT}" TEACHER="${TEACHER}" \
+        DATA="${DATA}" OUTPUT="${OUTPUT}" CKPT="${CKPT}" \
+        WANDB_DIR="${WANDB_DIR}" TRITON_CACHE_DIR="${TRITON_CACHE_DIR}" \
+        TEACHER_RAY_ADDRESS="${TEACHER_RAY_ADDRESS}" STUDENT_IP="${STUDENT_IP}" \
+        TRAIN_GPUS="${TRAIN_GPUS}" TEACHER_GPUS="${TEACHER_GPUS}" \
+        NUM_EPOCHS="${NUM_EPOCHS}" MAX_SAMPLES="${MAX_SAMPLES}" \
+    bash -s <<'INNER_BASH'
 
 cleanup() {
-    # Stop only this job's local Ray worker. Never stop the remote teacher head.
-    srun --overlap --container-image="${CONTAINER}" \
-        --container-mounts="/mnt/data:/mnt/data" \
-        ray stop --force >/dev/null 2>&1 || true
+    ray stop --force >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-echo "Joining teacher Ray head at ${TEACHER_RAY_ADDRESS}"
-echo "Student Ray node address: ${STUDENT_IP}"
-srun --overlap --container-image="${CONTAINER}" \
-    --container-mounts="/mnt/data:/mnt/data" \
-    env "${COMMON_ENV[@]}" \
-    ray start --address="${TEACHER_RAY_ADDRESS}" \
-        --node-ip-address="${STUDENT_IP}" \
-        --num-gpus="${TRAIN_GPUS}" --num-cpus=64 \
-        --resources="{\"student_node\": ${TRAIN_GPUS}}" \
-        --disable-usage-stats --block &
-RAY_WORKER_STEP_PID=$!
+mkdir -p "${TRITON_CACHE_DIR}"
+ray start --address="${TEACHER_RAY_ADDRESS}" \
+    --node-ip-address="${STUDENT_IP}" \
+    --num-gpus="${TRAIN_GPUS}" --num-cpus=64 \
+    --resources="{\"student_node\": ${TRAIN_GPUS}}" \
+    --disable-usage-stats || exit 1
 
-until srun --overlap --container-image="${CONTAINER}" \
-    --container-mounts="/mnt/data:/mnt/data" \
-    ray status --address="${TEACHER_RAY_ADDRESS}" 2>/dev/null \
-        | grep -q student_node; do
-    if ! kill -0 "${RAY_WORKER_STEP_PID}" 2>/dev/null; then
-        echo "Ray worker failed before joining the teacher cluster."
-        wait "${RAY_WORKER_STEP_PID}"
-    fi
-    sleep 2
-done
+ray status --address="${TEACHER_RAY_ADDRESS}" || exit 1
+
+cd "${KDFLOW_SRC}" || exit 1
+IMPORTED_KDFLOW="$(python -c 'import kdflow; print(kdflow.__file__)')" || exit 1
+echo "Imported KDFlow: ${IMPORTED_KDFLOW}"
+case "${IMPORTED_KDFLOW}" in
+    "${KDFLOW_SRC}"/*) ;;
+    *) echo "ERROR: Python imported stale KDFlow from ${IMPORTED_KDFLOW}"; exit 2 ;;
+esac
+python -c "from kdflow.arguments.distillation_args import DistillationArguments as A; assert hasattr(A, 'teacher_mode')" \
+    || exit 1
 
 EXTRA_TRAIN_ARGS=()
 if [ -n "${MAX_SAMPLES}" ]; then
     EXTRA_TRAIN_ARGS+=(--max_samples "${MAX_SAMPLES}")
 fi
 
-# The container ships another KDFlow checkout at /workspace/KDFlow. Run from
-# KDFLOW_SRC explicitly so Python cannot select that stale copy before PYTHONPATH.
-srun --overlap --container-image="${CONTAINER}" \
-    --container-mounts="/mnt/data:/mnt/data" \
-    env "${COMMON_ENV[@]}" \
-    bash -c 'cd "${KDFLOW_SRC}" || exit 1
-imported="$(python -c "import kdflow; print(kdflow.__file__)")" || exit 1
-echo "Imported KDFlow: ${imported}"
-case "${imported}" in
-    "${KDFLOW_SRC}"/*) ;;
-    *) echo "ERROR: Python imported stale KDFlow from ${imported}"; exit 2 ;;
-esac
-python -c "from kdflow.arguments.distillation_args import DistillationArguments as A; assert hasattr(A, '\''teacher_mode'\'')"' \
-    || exit 1
-
-srun --overlap --container-image="${CONTAINER}" \
-    --container-mounts="/mnt/data:/mnt/data" \
-    env "${COMMON_ENV[@]}" RAY_ADDRESS="${TEACHER_RAY_ADDRESS}" \
-        TRITON_CACHE_DIR="${TRITON_CACHE_DIR}" \
-    bash -c 'cd "${KDFLOW_SRC}" || exit 1; exec python -m kdflow.cli.train_kd_on_policy "$@"' bash \
+RAY_ADDRESS="${TEACHER_RAY_ADDRESS}" python -m kdflow.cli.train_kd_on_policy \
     --student_name_or_path "${STUDENT}" \
     --teacher_name_or_path "${TEACHER}" \
     --attn_implementation sdpa --use_liger_kernel False --enable_thinking False \
@@ -160,5 +149,6 @@ if [ "${TRAIN_EXIT}" -ne 0 ]; then
     echo "Student training failed with exit code ${TRAIN_EXIT}."
     exit "${TRAIN_EXIT}"
 fi
-
 echo "Student training finished successfully. Teacher job remains available."
+
+INNER_BASH

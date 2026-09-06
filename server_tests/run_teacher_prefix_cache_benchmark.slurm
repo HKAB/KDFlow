@@ -12,7 +12,7 @@
 set -euo pipefail
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
-KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
+KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/experiment/KDFlow"
 TEACHER_REPO="/mnt/data/huggingface/hub/models--google--gemma-4-31B-it"
 DATA="/mnt/data/users/truongnp5/uv_env/kdflow/data/train.jsonl"
 TEACHER_REV="$(cat "${TEACHER_REPO}/refs/main")"

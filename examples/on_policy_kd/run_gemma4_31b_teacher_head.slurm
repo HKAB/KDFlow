@@ -13,7 +13,7 @@
 # GPUs on which the student job will create the persistent TP4 teacher actor.
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
-KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
+KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/experiment/KDFlow"
 CONNECTION_DIR="/mnt/data/users/truongnp5/uv_env/kdflow/ray-connections"
 RAY_PORT="${RAY_PORT:-6379}"
 
@@ -21,11 +21,13 @@ mkdir -p logs "${CONNECTION_DIR}"
 test -f "${KDFLOW_SRC}/kdflow/backend/sglang/hidden_state_alignment.py"
 
 TEACHER_IP="$(hostname -I | awk '{print $1}')"
+TEACHER_HOSTNAME="$(hostname)"
 RAY_ADDRESS="${TEACHER_IP}:${RAY_PORT}"
 CONNECTION_FILE="${CONNECTION_DIR}/teacher-${SLURM_JOB_ID}.env"
 
-printf 'TEACHER_RAY_ADDRESS=%q\nTEACHER_JOB_ID=%q\n' \
-    "${RAY_ADDRESS}" "${SLURM_JOB_ID}" > "${CONNECTION_FILE}"
+printf 'TEACHER_RAY_ADDRESS=%q\nTEACHER_HOSTNAME=%q\nTEACHER_JOB_ID=%q\n' \
+    "${RAY_ADDRESS}" "${TEACHER_HOSTNAME}" "${SLURM_JOB_ID}" \
+    > "${CONNECTION_FILE}"
 
 cleanup() {
     srun --overlap --container-image="${CONTAINER}" \
@@ -36,11 +38,13 @@ trap cleanup EXIT
 
 echo "============================================================"
 echo "Teacher Ray head is starting"
+echo "Hostname: ${TEACHER_HOSTNAME}"
 echo "Address: ${RAY_ADDRESS}"
 echo "Connection file: ${CONNECTION_FILE}"
 echo
 echo "Submit the student job with:"
-echo "sbatch --export=ALL,TEACHER_RAY_ADDRESS=${RAY_ADDRESS} \\"
+echo "sbatch --exclude=${TEACHER_HOSTNAME} \\"
+echo "  --export=ALL,TEACHER_RAY_ADDRESS=${RAY_ADDRESS},TEACHER_HOSTNAME=${TEACHER_HOSTNAME} \\"
 echo "  examples/on_policy_kd/run_gemma4_e2b_student_rollout.slurm"
 echo "============================================================"
 

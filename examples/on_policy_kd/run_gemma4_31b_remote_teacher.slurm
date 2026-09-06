@@ -16,7 +16,7 @@
 # without changing the commands below.
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
-KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
+KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/experiment/KDFlow"
 EXPECTED_BASE_COMMIT="b83de0f64c5ca404c969e27cea45c6da3ac35485"
 TRAIN_GPUS="${TRAIN_GPUS:-8}"
 TEACHER_GPUS="${TEACHER_GPUS:-4}"
