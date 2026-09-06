@@ -165,9 +165,29 @@ def init_args(scenario: str = "sft"):
             )
 
         teacher_parallel = args.kd.teacher_tp_size * args.kd.teacher_pp_size
-        if total_gpus % teacher_parallel != 0:
+        teacher_gpus = total_gpus
+        if scenario == "on_policy_kd" and args.kd.teacher_mode == "persistent_remote":
+            teacher_gpus = (
+                args.kd.teacher_num_nodes * args.kd.teacher_num_gpus_per_node
+            )
+            if args.kd.multi_teacher_config is not None:
+                raise ValueError(
+                    "persistent_remote teacher mode does not yet support multi_teacher_config."
+                )
+            if args.data.image_key is not None:
+                raise ValueError(
+                    "persistent_remote teacher mode currently supports text-only data; "
+                    "multimodal token expansion needs a separate position mapping."
+                )
+            if args.kd.teacher_disable_radix_cache:
+                raise ValueError(
+                    "persistent_remote teacher mode requires "
+                    "--teacher_disable_radix_cache False."
+                )
+
+        if teacher_gpus % teacher_parallel != 0:
             raise ValueError(
-                f"Total GPUs ({total_gpus}) must be divisible by "
+                f"Teacher GPUs ({teacher_gpus}) must be divisible by "
                 f"teacher_tp_size * teacher_pp_size ({args.kd.teacher_tp_size} * {args.kd.teacher_pp_size} = {teacher_parallel})."
             )
             
@@ -178,12 +198,12 @@ def init_args(scenario: str = "sft"):
             )
             args.kd.teacher_ep_size = args.kd.teacher_tp_size
             
-        expected_dp = total_gpus // teacher_parallel
+        expected_dp = teacher_gpus // teacher_parallel
         if args.kd.teacher_dp_size != expected_dp:
             logger.warning(
                 f"Auto-adjusting teacher_dp_size from {args.kd.teacher_dp_size} to {expected_dp} "
-                f"to match total GPUs ({total_gpus}). "
-                f"(tp={args.kd.teacher_tp_size} (ep={args.kd.teacher_ep_size}) * pp={args.kd.teacher_pp_size} * dp={expected_dp} = {total_gpus})"
+                f"to match teacher GPUs ({teacher_gpus}). "
+                f"(tp={args.kd.teacher_tp_size} (ep={args.kd.teacher_ep_size}) * pp={args.kd.teacher_pp_size} * dp={expected_dp} = {teacher_gpus})"
             )
             args.kd.teacher_dp_size = expected_dp
     

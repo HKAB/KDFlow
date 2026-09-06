@@ -6,6 +6,7 @@ This allows using numpy() instead of tolist() for hidden_states, which is much f
 from __future__ import annotations
 
 import logging
+import inspect
 import os
 import time
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
@@ -327,6 +328,23 @@ def apply_patch():
                 print(
                     "[monkey_patch] SGLang SchedulerBatchResultProcessor has no "
                     "_append_prefill_hidden_states method",
+                    flush=True,
+                )
+                return False
+            expected_parameters = {
+                "self",
+                "req",
+                "logits_output",
+                "hidden_state_offset",
+                "capture_hidden_mode",
+                "extend_input_len",
+                "store",
+            }
+            actual_parameters = set(inspect.signature(current_method).parameters)
+            if actual_parameters != expected_parameters:
+                print(
+                    "[monkey_patch] Refusing to patch an incompatible SGLang "
+                    f"_append_prefill_hidden_states signature: {actual_parameters}",
                     flush=True,
                 )
                 return False

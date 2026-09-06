@@ -12,6 +12,7 @@ from sglang.srt.entrypoints.engine import Engine as _SglEngine
 from sglang.srt.managers.scheduler import run_scheduler_process as _original_run_scheduler_process
 
 from kdflow.utils.logging_utils import init_logger
+from kdflow.backend.sglang.hidden_state_alignment import select_loss_hidden_states
 
 logger = init_logger(__name__)
 
@@ -19,11 +20,12 @@ logger = init_logger(__name__)
 os.environ["SGLANG_JIT_DEEPGEMM_FAST_WARMUP"] = "true"
 
 def _patched_run_scheduler_process(*args, **kwargs):
-    try:
-        from kdflow.backend.sglang.monkey_patch import apply_patch
-        apply_patch()
-    except Exception as e:
-        logger.warning(f"[PatchedEngine] WARNING: Failed to apply monkey patch (PID={os.getpid()}): {e}", flush=True)
+    from kdflow.backend.sglang.monkey_patch import apply_patch
+    if not apply_patch():
+        raise RuntimeError(
+            "KDFlow could not install its SGLang hidden-state transfer patch. "
+            "Verify that the runtime uses the supported SGLang 0.5.17 API."
+        )
     return _original_run_scheduler_process(*args, **kwargs)
 
 
@@ -105,6 +107,9 @@ def _engine_worker(config: EngineConfig, request_queue: Queue, response_queue: Q
                     _handle_wakeup(engine, request, config, response_queue)
                 elif req_type == "update_weights_from_tensor":
                     _handle_update_weights_from_tensor(engine, request, response_queue)
+                elif req_type == "flush_cache":
+                    engine.flush_cache()
+                    response_queue.put({"type": "flush_cache", "success": True})
                 else:
                     response_queue.put({"type": req_type, "success": False,
                                         "error": f"Unknown request type: {req_type}"})
@@ -175,34 +180,43 @@ def _handle_generate(engine, request, hidden_queue, response_queue):
                     f"prompt_tokens={meta_info.get('prompt_tokens')}, "
                     f"completion_tokens={meta_info.get('completion_tokens')})"
                 )
-            hs_np = hidden_states[0]
-
-            # hs_np and mask may differ due to multimodal token expansion.
-            hs_len = hs_np.shape[0]
-            mask_len = mask.shape[0]
-            if hs_len == mask_len:
-                hs_np = hs_np[mask]
-            else:  # for multimodal data
+            raw_hidden_states = np.asarray(hidden_states[0])
+            if (
+                kwargs.get("image_data") is not None
+                and raw_hidden_states.shape[0] != mask.shape[0]
+            ):
+                # Preserve the established multimodal expansion behavior in the
+                # colocated mode. persistent_remote rejects multimodal inputs.
                 num_loss_tokens = int(mask.sum())
-                if kwargs.get("image_data") is None:
-                    logger.warning(
-                        f"[_handle_generate] sample={idx}/{num_samples} length mismatch: "
-                        f"hs_len={hs_len}, mask_len={mask_len}, diff={mask_len - hs_len}; "
-                        f"selecting {num_loss_tokens} loss tokens from the tail"
-                    )
-                if num_loss_tokens >= hs_len:
+                if num_loss_tokens >= raw_hidden_states.shape[0]:
                     raise ValueError(
-                        f"Cannot select {num_loss_tokens} loss tokens from "
-                        f"hidden states of length {hs_len}"
+                        f"Cannot select {num_loss_tokens} multimodal loss tokens "
+                        f"from {raw_hidden_states.shape[0]} hidden states"
                     )
-                # The loss span is a contiguous suffix before the final token.
-                hs_np = hs_np[-num_loss_tokens - 1:-1]
+                hs_np = raw_hidden_states[-num_loss_tokens - 1:-1]
+                alignment = {
+                    "input_length": int(mask.shape[0]),
+                    "returned_length": int(raw_hidden_states.shape[0]),
+                    "selected_length": num_loss_tokens,
+                    "multimodal_tail_selection": True,
+                }
+            else:
+                hs_np, alignment = select_loss_hidden_states(
+                    raw_hidden_states, mask, sample_index=idx
+                )
 
             if not hs_np.flags['C_CONTIGUOUS']:
                 hs_np = np.ascontiguousarray(hs_np)
 
             hs_tensor = torch.from_numpy(hs_np).share_memory_()
-            hidden_queue.put((idx, hs_tensor))
+            metadata = {
+                key: value
+                for key, value in meta_info.items()
+                if key != "hidden_states"
+                and isinstance(value, (str, int, float, bool, type(None)))
+            }
+            metadata["hidden_state_alignment"] = alignment
+            hidden_queue.put((idx, hs_tensor, metadata))
             received_indices.add(idx)
 
         if len(received_indices) != num_samples:
@@ -295,6 +309,7 @@ class SGLangEngineService:
         sampling_params: Dict[str, Any],
         return_hidden_states: bool = True,
         image_data=None,
+        return_metadata: bool = False,
     ) -> List[np.ndarray]:
         """Run generation and return hidden states via shared-memory tensors.
         
@@ -305,6 +320,7 @@ class SGLangEngineService:
             sampling_params: Sampling parameters (e.g. max_new_tokens=0 for prefill-only).
             return_hidden_states: Whether to return hidden states.
             image_data: Optional list of image data for multimodal models.
+            return_metadata: Return ``(hidden_states, metadata)`` per sample.
         """
         if not self._started:
             raise RuntimeError("Service not started")
@@ -349,10 +365,12 @@ class SGLangEngineService:
                 if isinstance(message, str):
                     raise RuntimeError(f"Generate failed in engine subprocess:\n{message}")
 
-                idx, hs_tensor = message
+                idx, hs_tensor, metadata = message
                 hs_np = hs_tensor.numpy().copy()
                 del hs_tensor
-                hidden_states[idx] = hs_np
+                hidden_states[idx] = (
+                    (hs_np, metadata) if return_metadata else hs_np
+                )
                 received_count += 1
             except queue.Empty:
                 elapsed_total = time.time() - t_recv_start
@@ -363,6 +381,15 @@ class SGLangEngineService:
                 )
 
         return hidden_states
+
+    def flush_cache(self):
+        """Flush the engine radix cache."""
+        if not self._started:
+            return
+        self.request_queue.put({"type": "flush_cache"})
+        response = self._get_response(req_type="flush_cache", timeout=300)
+        if not response.get("success"):
+            raise RuntimeError(f"flush_cache failed: {response.get('error')}")
 
     def sleep(self, tags: Optional[str] = "all"):
         """Release GPU memory."""

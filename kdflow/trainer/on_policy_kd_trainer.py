@@ -64,6 +64,10 @@ class OnPolicyKDTrainer:
         self.custom_eval_fn = custom_eval_fn
         self.epochs = self.args.train.num_epochs
         self.use_lora = self.args.model.lora_rank > 0
+        self.teacher_sleep_enabled = (
+            self.args.train.enable_sleep
+            and self.args.kd.teacher_mode != "persistent_remote"
+        )
         self.rollout_manager = RolloutManager(
             strategy=strategy,
             rollout_group=rollout_group,
@@ -217,7 +221,7 @@ class OnPolicyKDTrainer:
                 all_global_batches = self._prepare_global_batches(rollout_samples, num_micro_batches)
 
                 teacher_start = time.time()
-                if self.args.train.enable_sleep:
+                if self.teacher_sleep_enabled:
                     self.teacher.wakeup()
 
                 teacher_batches = sum(all_global_batches, [])
@@ -233,7 +237,7 @@ class OnPolicyKDTrainer:
                         f"Teacher forward returned {len(teacher_batches)} batches, expected {batch_idx}."
                     )
 
-                if self.args.train.enable_sleep:
+                if self.teacher_sleep_enabled:
                     self.teacher.sleep()
                 self.log_state["timing/teacher_forward"].append(time.time() - teacher_start)
                 
@@ -258,12 +262,12 @@ class OnPolicyKDTrainer:
                 # update weights in teacher actors (only for self-distillation)
                 if self.args.model.teacher_name_or_path == self.args.model.student_name_or_path \
                     and self.global_step % self.args.kd.teacher_update_freq == 0:
-                    if self.args.train.enable_sleep:
+                    if self.teacher_sleep_enabled:
                         self.teacher.wakeup(tags=["weights"])
                     teacher_update_start = time.time()
                     self.student.update_teacher_weights()
                     self.log_state["timing/teacher_weight_sync"].append(time.time() - teacher_update_start)
-                    if self.args.train.enable_sleep:
+                    if self.teacher_sleep_enabled:
                         self.teacher.sleep(tags=["weights"])
                     
                 if self.args.train.enable_sleep:
@@ -319,10 +323,10 @@ class OnPolicyKDTrainer:
                 dp_size=self.dp_size,
             )
 
-        if self.args.train.enable_sleep:
+        if self.teacher_sleep_enabled:
             self.teacher.wakeup()
         eval_batches = self.teacher.forward(eval_batches)
-        if self.args.train.enable_sleep:
+        if self.teacher_sleep_enabled:
             self.teacher.sleep()
 
         if self.args.train.enable_sleep:

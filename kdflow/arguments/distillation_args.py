@@ -60,6 +60,33 @@ class DistillationArguments:
         default=0.4,
         metadata={"help": "Memory fraction for teacher model."}
     )
+    teacher_mode: str = field(
+        default="colocated",
+        metadata={
+            "help": "Teacher placement/lifetime mode.",
+            "choices": ["colocated", "persistent_remote"],
+        },
+    )
+    teacher_num_nodes: int = field(
+        default=1,
+        metadata={"help": "Number of dedicated Ray nodes for persistent_remote teacher mode."},
+    )
+    teacher_num_gpus_per_node: int = field(
+        default=8,
+        metadata={"help": "Teacher GPUs per node in persistent_remote mode."},
+    )
+    teacher_resource_name: str = field(
+        default="teacher_node",
+        metadata={"help": "Ray custom resource advertised only by dedicated teacher nodes."},
+    )
+    student_resource_name: str = field(
+        default="student_node",
+        metadata={"help": "Ray custom resource advertised only by student/rollout nodes."},
+    )
+    teacher_disable_radix_cache: bool = field(
+        default=True,
+        metadata={"help": "Disable the SGLang teacher radix cache."},
+    )
     teacher_update_freq: int = field(
         default=10,
         metadata={"help": "Weight update frequency for teacher model."}
@@ -114,6 +141,14 @@ class DistillationArguments:
     )
 
     def __post_init__(self):
+        if self.teacher_mode not in ("colocated", "persistent_remote"):
+            raise ValueError(f"Unsupported teacher_mode: {self.teacher_mode}")
+        if self.teacher_num_nodes <= 0 or self.teacher_num_gpus_per_node <= 0:
+            raise ValueError("Dedicated teacher node and GPU counts must be positive.")
+        if not self.teacher_resource_name or not self.student_resource_name:
+            raise ValueError("Teacher and student Ray resource names must not be empty.")
+        if self.teacher_resource_name == self.student_resource_name:
+            raise ValueError("Teacher and student Ray resource names must be different.")
         # Validate teacher parallel size settings
         if self.teacher_ep_size > self.teacher_tp_size:
             raise ValueError(
@@ -130,5 +165,3 @@ class DistillationArguments:
             raise ValueError(f"kd_temperature must be > 0, got {self.kd_temperature}.")
         if not 0.0 < self.teacher_mem_fraction_static <= 1.0:
             raise ValueError(f"teacher_mem_fraction_static must be in (0, 1], got {self.teacher_mem_fraction_static}.")
-
-

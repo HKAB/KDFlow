@@ -22,6 +22,14 @@ def train(args):
     use_lora = args.model.lora_rank > 0
     if use_lora and args.model.student_name_or_path == args.model.teacher_name_or_path:
         raise ValueError("On-policy LoRA does not support self-distillation yet.")
+    if (
+        args.kd.teacher_mode == "persistent_remote"
+        and args.model.student_name_or_path == args.model.teacher_name_or_path
+    ):
+        raise ValueError(
+            "persistent_remote does not support self-distillation weight updates; "
+            "CUDA IPC handles cannot be transferred between physical nodes."
+        )
 
     # Initialize Ray if not already initialized
     if not ray.is_initialized():
@@ -40,7 +48,31 @@ def train(args):
     
     # Create placement group for resource allocation
     num_gpus = args.train.num_nodes * args.train.num_gpus_per_node
-    pg, reordered_bundle_indices, reordered_gpu_ids = create_placement_group(num_gpus)
+    student_resource_name = (
+        args.kd.student_resource_name
+        if args.kd.teacher_mode == "persistent_remote"
+        else None
+    )
+    pg, reordered_bundle_indices, reordered_gpu_ids = create_placement_group(
+        num_gpus, resource_name=student_resource_name
+    )
+
+    teacher_num_gpus = num_gpus
+    teacher_num_gpus_per_node = args.train.num_gpus_per_node
+    teacher_pg_info = (pg, reordered_bundle_indices, reordered_gpu_ids)
+    if args.kd.teacher_mode == "persistent_remote":
+        teacher_num_gpus = (
+            args.kd.teacher_num_nodes * args.kd.teacher_num_gpus_per_node
+        )
+        teacher_num_gpus_per_node = args.kd.teacher_num_gpus_per_node
+        teacher_pg_info = create_placement_group(
+            teacher_num_gpus,
+            resource_name=args.kd.teacher_resource_name,
+        )
+        strategy.print(
+            f"Persistent remote teacher placement ready with {teacher_num_gpus} "
+            f"GPUs on Ray resource '{args.kd.teacher_resource_name}'"
+        )
 
     rollout_server_args = None
     if use_lora:
@@ -72,10 +104,10 @@ def train(args):
     TeacherGroupCLS = MultiTeacherActorGroup if args.kd.multi_teacher_config else TeacherActorGroup
     teacher_model = TeacherGroupCLS(
         strategy,
-        num_gpus,
-        num_gpus_per_node=args.train.num_gpus_per_node,
+        teacher_num_gpus,
+        num_gpus_per_node=teacher_num_gpus_per_node,
         num_gpus_per_actor=0.01,
-        pg=(pg, reordered_bundle_indices, reordered_gpu_ids),
+        pg=teacher_pg_info,
     )
     student_model = StudentActorGroup(
         args,

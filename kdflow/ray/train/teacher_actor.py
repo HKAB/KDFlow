@@ -64,10 +64,10 @@ class TeacherRayActor:
             ep_size=self.ep_size,
             pp_size=self.pp_size,
             chunked_prefill_size=-1,  # Disable chunked prefill for full sequence processing
-            disable_radix_cache=True,  # Disable cache for deterministic behavior
+            disable_radix_cache=strategy.args.kd.teacher_disable_radix_cache,
             enable_return_hidden_states=True,  # Enable hidden states extraction
-            enable_memory_saver=True,  # Enable memory saving mode
-            enable_weights_cpu_backup=True,  # Backup weights to CPU for memory release
+            enable_memory_saver=strategy.args.kd.teacher_mode != "persistent_remote",
+            enable_weights_cpu_backup=strategy.args.kd.teacher_mode != "persistent_remote",
             quantization=strategy.args.kd.teacher_quantization,
             mem_fraction_static=strategy.args.kd.teacher_mem_fraction_static,
             offload_tags=strategy.args.kd.teacher_offload_tags,
@@ -81,11 +81,18 @@ class TeacherRayActor:
         self.engine_service = SGLangEngineService(self.engine_config)
         self.engine_service.start()
         
-        if self.strategy.args.train.enable_sleep and self.node_rank == 0:
+        if self._sleep_enabled and self.node_rank == 0:
             logger.info(f"[TeacherRayActor] Teacher sleep after initialization")
             self.engine_service.sleep(tags=self.strategy.args.kd.teacher_offload_tags)
         
         logger.info(f"[TeacherRayActor] Initialized with tp_size={self.tp_size}, ep_size={self.ep_size}, pp_size={self.pp_size}")
+
+    @property
+    def _sleep_enabled(self):
+        return (
+            self.strategy.args.train.enable_sleep
+            and self.strategy.args.kd.teacher_mode != "persistent_remote"
+        )
 
     def ready(self):
         """Return True when the actor is ready (engine service started)."""
@@ -129,13 +136,28 @@ class TeacherRayActor:
         if batches[0].get("images") is not None:
             image_data = sum((micro_batch["images"] for micro_batch in batches), [])
         
-        hidden_states_list = self.engine_service.generate(
+        persistent_remote = self.strategy.args.kd.teacher_mode == "persistent_remote"
+        generated = self.engine_service.generate(
             input_ids=input_ids,
             loss_masks=unpadded_loss_masks,
             sampling_params={"max_new_tokens": 1},   # To support SGLang 0.5.17
             return_hidden_states=True,
             image_data=image_data,
+            return_metadata=persistent_remote,
         )
+        if persistent_remote:
+            hidden_states_list = [item[0] for item in generated]
+            alignments = [item[1]["hidden_state_alignment"] for item in generated]
+            logger.info(
+                "[TeacherRayActor] radix batch: samples=%d, input_tokens=%d, "
+                "returned_prefill_tokens=%d, inferred_cached_prefix_tokens=%d",
+                len(alignments),
+                sum(item["input_length"] for item in alignments),
+                sum(item["returned_length"] for item in alignments),
+                sum(item["inferred_cached_prefix_length"] for item in alignments),
+            )
+        else:
+            hidden_states_list = generated
         
         # Process in micro-batch groups with vectorized operations
         sample_idx = 0
@@ -152,12 +174,16 @@ class TeacherRayActor:
     
     def sleep(self, tags=None):
         """Release GPU memory occupation, move weights to CPU."""
+        if not self._sleep_enabled:
+            return
         if tags is None:
             tags = self.strategy.args.kd.teacher_offload_tags
         self.engine_service.sleep(tags=tags)
         
     def wakeup(self, tags=None):
         """Resume GPU memory occupation, move weights back to GPU."""
+        if not self._sleep_enabled:
+            return
         if tags is None:
             tags = self.strategy.args.kd.teacher_offload_tags
         self.engine_service.wakeup(tags=tags)
@@ -167,8 +193,8 @@ class TeacherRayActor:
             serialized_named_tensors, load_format, flush_cache)
     
     def flush_cache(self):
-        """Flush cache. No-op for teacher engine since disable_radix_cache=True."""
-        pass
+        """Flush the teacher radix cache."""
+        return self.engine_service.flush_cache()
     
     def shutdown(self):
         """Shutdown the engine service."""

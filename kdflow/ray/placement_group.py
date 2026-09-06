@@ -29,13 +29,16 @@ def _sort_key(x):
     return (ip_parts, gpu_id)
 
 
-def create_placement_group(num_gpus):
+def create_placement_group(num_gpus, resource_name=None):
     """Create a placement group and return topology-sorted bundle info.
 
     Returns:
         (pg, reordered_bundle_indices, reordered_gpu_ids)
     """
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
+    if resource_name:
+        for bundle in bundles:
+            bundle[resource_name] = 1
     pg = placement_group(bundles, strategy="PACK")
     ray.get(pg.ready())
 
