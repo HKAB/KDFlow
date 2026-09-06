@@ -18,17 +18,8 @@
 # Ten-step baseline benchmark (long enough to get past warm-up):
 #   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-safe \
 #     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
-# Then test without CPU offload between phases:
+# Faster proven configuration without CPU offload between phases:
 #   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-nosleep,ENABLE_SLEEP=False \
-#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
-# Test faster training while preserving phase offload headroom:
-#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-nockpt,GRADIENT_CHECKPOINTING=False \
-#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
-# Test the model's supported low-memory attention backend:
-#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-flash,ENABLE_SLEEP=False,ATTN_IMPLEMENTATION=flash_attention_2 \
-#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
-# Only if FlashAttention works, combine it with no activation recomputation:
-#   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-flash-fast,ENABLE_SLEEP=False,GRADIENT_CHECKPOINTING=False,ATTN_IMPLEMENTATION=flash_attention_2 \
 #     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
@@ -40,9 +31,8 @@ RAY_PORT="${RAY_PORT:-6379}"
 
 # Use MAX_SAMPLES=64 for a one-iteration integration test.
 MAX_SAMPLES="${MAX_SAMPLES:-}"
-ENABLE_SLEEP="${ENABLE_SLEEP:-True}"
+ENABLE_SLEEP="${ENABLE_SLEEP:-False}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
 CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE:-1024}"
 MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-12288}"
 LOGGING_STEPS="${LOGGING_STEPS:-10}"
@@ -98,7 +88,6 @@ srun --container-image="${CONTAINER}" \
         NUM_EPOCHS="${NUM_EPOCHS}" MAX_SAMPLES="${MAX_SAMPLES}" \
         ENABLE_SLEEP="${ENABLE_SLEEP}" \
         GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING}" \
-        ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION}" \
         CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE}" \
         MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU}" \
         LOGGING_STEPS="${LOGGING_STEPS}" RUN_TAG="${RUN_TAG}" \
@@ -136,8 +125,7 @@ fi
 python -m kdflow.cli.train_kd_on_policy \
     --student_name_or_path "${STUDENT}" \
     --teacher_name_or_path "${TEACHER}" \
-    --attn_implementation "${ATTN_IMPLEMENTATION}" \
-    --use_liger_kernel False --enable_thinking False \
+    --attn_implementation sdpa --use_liger_kernel False --enable_thinking False \
     --num_nodes 1 --num_gpus_per_node "${STUDENT_GPUS}" \
     --backend fsdp2 --fsdp_size -1 --cpu_offload False \
     --train_dataset_path "${DATA}" --input_key messages \
