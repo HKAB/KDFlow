@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
+from kdflow.backend.sglang.hidden_state_alignment import (
+    RADIX_CACHE_PREFIX_LIMIT_PARAM,
+    cap_radix_prefix_length,
+)
 from kdflow.utils.logging_utils import init_logger
 
 if TYPE_CHECKING:
@@ -27,6 +31,74 @@ logger = init_logger(__name__)
 
 # Flag to prevent multiple patch applications
 _PATCH_APPLIED = False
+_RADIX_HIDDEN_STATE_PATCH_APPLIED = False
+_ORIGINAL_COMPUTE_MAX_PREFIX_LEN = None
+
+
+def compute_max_prefix_len_with_hidden_state_guard(self, input_len: int) -> int:
+    """Prevent radix reuse from hiding requested KD hidden states."""
+    if _ORIGINAL_COMPUTE_MAX_PREFIX_LEN is None:
+        raise RuntimeError("Original SGLang prefix-limit method was not captured")
+
+    max_prefix_len = _ORIGINAL_COMPUTE_MAX_PREFIX_LEN(self, input_len)
+    custom_params = self.sampling_params.custom_params or {}
+    loss_start_position = custom_params.get(RADIX_CACHE_PREFIX_LIMIT_PARAM, -1)
+    return cap_radix_prefix_length(
+        max(max_prefix_len, 0),
+        loss_start_position,
+        return_hidden_states=bool(self.return_hidden_states),
+    )
+
+
+def apply_radix_hidden_state_patch():
+    """Install the SGLang 0.5.17 radix boundary guard.
+
+    The exact per-request boundary is carried in SGLang's JSON-safe
+    ``sampling_params.custom_params`` field. This avoids the input-logprob path,
+    which materializes large full-vocabulary logits.
+    """
+    global _ORIGINAL_COMPUTE_MAX_PREFIX_LEN
+    global _RADIX_HIDDEN_STATE_PATCH_APPLIED
+
+    if _RADIX_HIDDEN_STATE_PATCH_APPLIED:
+        return True
+
+    try:
+        from sglang.srt.managers.schedule_batch import Req
+
+        current_method = getattr(Req, "_compute_max_prefix_len", None)
+        if current_method is None:
+            print(
+                "[monkey_patch] SGLang Req has no _compute_max_prefix_len method",
+                flush=True,
+            )
+            return False
+        if getattr(current_method, "_kdflow_hidden_state_guard", False):
+            _RADIX_HIDDEN_STATE_PATCH_APPLIED = True
+            return True
+
+        actual_parameters = set(inspect.signature(current_method).parameters)
+        if actual_parameters != {"self", "input_len"}:
+            print(
+                "[monkey_patch] Refusing to patch an incompatible SGLang "
+                f"_compute_max_prefix_len signature: {actual_parameters}",
+                flush=True,
+            )
+            return False
+
+        _ORIGINAL_COMPUTE_MAX_PREFIX_LEN = current_method
+        compute_max_prefix_len_with_hidden_state_guard._kdflow_hidden_state_guard = True
+        Req._compute_max_prefix_len = compute_max_prefix_len_with_hidden_state_guard
+        _RADIX_HIDDEN_STATE_PATCH_APPLIED = True
+        print(
+            "[monkey_patch] SUCCESS: Req._compute_max_prefix_len patched for "
+            f"KD hidden states! PID={os.getpid()}",
+            flush=True,
+        )
+        return True
+    except (ImportError, AttributeError) as e:
+        print(f"[monkey_patch] Cannot install radix hidden-state guard: {e}", flush=True)
+        return False
 
 
 def process_batch_result_prefill_patched(

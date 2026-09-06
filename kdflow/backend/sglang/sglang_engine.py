@@ -13,6 +13,7 @@ from sglang.srt.managers.scheduler import run_scheduler_process as _original_run
 
 from kdflow.utils.logging_utils import init_logger
 from kdflow.backend.sglang.hidden_state_alignment import (
+    RADIX_CACHE_PREFIX_LIMIT_PARAM,
     loss_mask_start_positions,
     select_loss_hidden_states,
 )
@@ -23,10 +24,13 @@ logger = init_logger(__name__)
 os.environ["SGLANG_JIT_DEEPGEMM_FAST_WARMUP"] = "true"
 
 def _patched_run_scheduler_process(*args, **kwargs):
-    from kdflow.backend.sglang.monkey_patch import apply_patch
-    if not apply_patch():
+    from kdflow.backend.sglang.monkey_patch import (
+        apply_patch,
+        apply_radix_hidden_state_patch,
+    )
+    if not apply_patch() or not apply_radix_hidden_state_patch():
         raise RuntimeError(
-            "KDFlow could not install its SGLang hidden-state transfer patch. "
+            "KDFlow could not install its SGLang hidden-state patches. "
             "Verify that the runtime uses the supported SGLang 0.5.17 API."
         )
     return _original_run_scheduler_process(*args, **kwargs)
@@ -154,14 +158,14 @@ def _handle_generate(engine, request, hidden_queue, response_queue):
     cache_prefix_limits = None
     if kwargs.get("protect_loss_hidden_states", False):
         cache_prefix_limits = loss_mask_start_positions(kwargs["loss_masks"])
-        # In SGLang 0.5.17, logprob_start_len is also the public per-request
-        # upper bound for radix-prefix matching. We discard the logprobs; this
-        # ensures that all KD-required hidden states are newly computed.
-        generate_kwargs.update(
-            return_logprob=True,
-            logprob_start_len=cache_prefix_limits,
-            top_logprobs_num=0,
-        )
+        base_sampling_params = kwargs["sampling_params"]
+        generate_kwargs["sampling_params"] = []
+        for cache_prefix_limit in cache_prefix_limits:
+            sample_params = dict(base_sampling_params)
+            custom_params = dict(sample_params.get("custom_params") or {})
+            custom_params[RADIX_CACHE_PREFIX_LIMIT_PARAM] = cache_prefix_limit
+            sample_params["custom_params"] = custom_params
+            generate_kwargs["sampling_params"].append(sample_params)
     if kwargs.get("image_data") is not None:
         generate_kwargs["image_data"] = kwargs["image_data"]
 
@@ -339,8 +343,9 @@ class SGLangEngineService:
             image_data: Optional list of image data for multimodal models.
             return_metadata: Return ``(hidden_states, metadata)`` per sample.
             protect_loss_hidden_states: Prevent radix reuse from extending into
-                positions selected by ``loss_masks``. This uses SGLang's public
-                ``logprob_start_len`` cache boundary.
+                positions selected by ``loss_masks``. The KDFlow SGLang patch
+                reads a per-request boundary from ``sampling_params.custom_params``;
+                input log probabilities are not computed.
         """
         if not self._started:
             raise RuntimeError("Service not started")

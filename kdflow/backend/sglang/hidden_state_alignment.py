@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
+RADIX_CACHE_PREFIX_LIMIT_PARAM = "kdflow_radix_cache_prefix_limit"
+
 
 def loss_mask_start_positions(loss_masks) -> list[int]:
     """Return the first KD position per sample, or -1 for an empty mask.
@@ -28,6 +30,18 @@ def loss_mask_start_positions(loss_masks) -> list[int]:
         required_positions = np.flatnonzero(mask)
         starts.append(int(required_positions[0]) if required_positions.size else -1)
     return starts
+
+
+def cap_radix_prefix_length(
+    max_prefix_length: int,
+    loss_start_position: int,
+    *,
+    return_hidden_states: bool,
+) -> int:
+    """Apply the KD hidden-state boundary to SGLang's normal cache limit."""
+    if return_hidden_states and loss_start_position >= 0:
+        return min(max_prefix_length, loss_start_position)
+    return max_prefix_length
 
 
 def select_loss_hidden_states(
