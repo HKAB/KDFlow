@@ -15,8 +15,6 @@
 # supports heterogeneous Slurm jobs, the second node can be requested as GPU:4
 # without changing the commands below.
 
-set -euo pipefail
-
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
 KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
 EXPECTED_BASE_COMMIT="b83de0f64c5ca404c969e27cea45c6da3ac35485"

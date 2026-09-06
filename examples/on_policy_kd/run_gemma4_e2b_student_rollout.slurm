@@ -13,8 +13,6 @@
 # wake keeps only the active component resident. The TP4 teacher stays awake on
 # the separately submitted teacher job.
 
-set -euo pipefail
-
 : "${TEACHER_RAY_ADDRESS:?Submit with --export=ALL,TEACHER_RAY_ADDRESS=<teacher-ip>:6379}"
 
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
@@ -54,6 +52,7 @@ if ! grep -q persistent_remote "${KDFLOW_SRC}/kdflow/cli/train_kd_on_policy.py";
 fi
 
 COMMON_ENV=(
+    KDFLOW_SRC="${KDFLOW_SRC}"
     PYTHONPATH="${KDFLOW_SRC}"
     HF_HOME="${HF_CACHE}"
     TRANSFORMERS_CACHE="${HF_CACHE}"
@@ -100,11 +99,26 @@ if [ -n "${MAX_SAMPLES}" ]; then
     EXTRA_TRAIN_ARGS+=(--max_samples "${MAX_SAMPLES}")
 fi
 
+# The container ships another KDFlow checkout at /workspace/KDFlow. Run from
+# KDFLOW_SRC explicitly so Python cannot select that stale copy before PYTHONPATH.
+srun --overlap --container-image="${CONTAINER}" \
+    --container-mounts="/mnt/data:/mnt/data" \
+    env "${COMMON_ENV[@]}" \
+    bash -c 'cd "${KDFLOW_SRC}" || exit 1
+imported="$(python -c "import kdflow; print(kdflow.__file__)")" || exit 1
+echo "Imported KDFlow: ${imported}"
+case "${imported}" in
+    "${KDFLOW_SRC}"/*) ;;
+    *) echo "ERROR: Python imported stale KDFlow from ${imported}"; exit 2 ;;
+esac
+python -c "from kdflow.arguments.distillation_args import DistillationArguments as A; assert hasattr(A, '\''teacher_mode'\'')"' \
+    || exit 1
+
 srun --overlap --container-image="${CONTAINER}" \
     --container-mounts="/mnt/data:/mnt/data" \
     env "${COMMON_ENV[@]}" RAY_ADDRESS="${TEACHER_RAY_ADDRESS}" \
         TRITON_CACHE_DIR="${TRITON_CACHE_DIR}" \
-    python -m kdflow.cli.train_kd_on_policy \
+    bash -c 'cd "${KDFLOW_SRC}" || exit 1; exec python -m kdflow.cli.train_kd_on_policy "$@"' bash \
     --student_name_or_path "${STUDENT}" \
     --teacher_name_or_path "${TEACHER}" \
     --attn_implementation sdpa --use_liger_kernel False --enable_thinking False \
@@ -137,5 +151,11 @@ srun --overlap --container-image="${CONTAINER}" \
     --wandb_run_name "kdflow-${SLURM_JOB_ID}" --wandb_dir "${WANDB_DIR}" \
     --save_steps 500 --eval_steps -1 --ckpt_path "${CKPT}" \
     --save_path "${OUTPUT}" "${EXTRA_TRAIN_ARGS[@]}"
+
+TRAIN_EXIT=$?
+if [ "${TRAIN_EXIT}" -ne 0 ]; then
+    echo "Student training failed with exit code ${TRAIN_EXIT}."
+    exit "${TRAIN_EXIT}"
+fi
 
 echo "Student training finished successfully. Teacher job remains available."

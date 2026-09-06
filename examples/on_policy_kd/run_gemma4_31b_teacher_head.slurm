@@ -12,8 +12,6 @@
 # Start this job first and leave it running. It owns the Ray head and the four
 # GPUs on which the student job will create the persistent TP4 teacher actor.
 
-set -euo pipefail
-
 CONTAINER="/mnt/data/slurm/images/songmzhang+kdflow+v0.2.1-sgl0517-torch211-cu129.sqsh"
 KDFLOW_SRC="/mnt/data/users/truongnp5/uv_env/kdflow/KDFlow-main"
 CONNECTION_DIR="/mnt/data/users/truongnp5/uv_env/kdflow/ray-connections"
