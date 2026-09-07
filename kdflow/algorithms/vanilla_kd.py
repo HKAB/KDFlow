@@ -9,6 +9,7 @@ from kdflow.loss.cross_entropy import compute_cross_entropy
 from kdflow.metrics.entropy import compute_entropy
 from kdflow.metrics.rollout_consistency import compute_rollout_consistency
 from kdflow.metrics.topk_token_overlap import compute_topk_token_overlap_ratios
+from kdflow.utils.token_suppression import load_kd_suppress_token_ids
 
 
 @register_algorithm("vanilla_kd")
@@ -19,6 +20,11 @@ class VanillaKD:
         self.student = student_model
         self.teacher_lm_head = teacher_lm_head
         self.loss_fn = build_loss_fn(self.args.kd.kd_loss_fn, self.args)
+        self.suppress_token_ids = load_kd_suppress_token_ids()
+        if self.suppress_token_ids:
+            self.strategy.log(
+                f"Suppressing token IDs from KD logits: {self.suppress_token_ids}"
+            )
         # certain metrics will be recorded during training
         self.metric_fns = [compute_topk_token_overlap_ratios]
         if self.args.scenario == "on_policy_kd":
@@ -112,6 +118,7 @@ class VanillaKD:
                 student_hiddens, self.student.model.lm_head, self.loss_fn,
                 teacher_logits_fn=teacher_logits_fn, chunk_size=chunk_size, reduction="sum",
                 metric_fns=metric_fns, return_metrics=True,
+                suppress_token_ids=self.suppress_token_ids,
             )
         else:
             teacher_hiddens = teacher_hiddens.to(self.teacher_lm_head.weight)
@@ -120,6 +127,7 @@ class VanillaKD:
                 teacher_hidden=teacher_hiddens, teacher_head=self.teacher_lm_head,
                 chunk_size=chunk_size, reduction="sum",
                 metric_fns=metric_fns, return_metrics=True,
+                suppress_token_ids=self.suppress_token_ids,
             )
         kd_loss = kd_loss / avg_token_num
         loss_info = {"train/loss": kd_loss, "train/kd_loss": kd_loss}

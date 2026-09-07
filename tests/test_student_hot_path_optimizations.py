@@ -49,6 +49,7 @@ def test_vanilla_kd_skips_diagnostics_without_changing_loss(monkeypatch):
         weight=torch.ones((2, 2))
     )
     algorithm.loss_fn = object()
+    algorithm.suppress_token_ids = ()
     algorithm.metric_fns = [object()]
 
     result = algorithm.training_step(_micro_batch(collect_metrics=False))
@@ -73,3 +74,35 @@ def test_optimizer_step_returns_the_single_clipped_gradient_norm():
 
     strategy.step = 1
     assert strategy.optimizer_step(optimizer, model, scheduler=None) is None
+
+
+def test_chunked_kd_loss_suppresses_configured_logits():
+    from kdflow.loss.chunked_loss import chunked_loss
+
+    captured = {}
+
+    class _Head(torch.nn.Linear):
+        def forward(self, hidden, skip=False):
+            return super().forward(hidden)
+
+    def capture_loss(student_logits, teacher_logits, reduction, **kwargs):
+        captured["student"] = student_logits.detach().clone()
+        captured["teacher"] = teacher_logits.detach().clone()
+        return student_logits[:, 0] * 0
+
+    student_head = _Head(2, 4, bias=False)
+    teacher_head = torch.nn.Linear(2, 4, bias=False)
+    chunked_loss(
+        torch.ones((1, 2)),
+        student_head,
+        capture_loss,
+        teacher_hidden=torch.ones((1, 2)),
+        teacher_head=teacher_head,
+        reduction="sum",
+        suppress_token_ids=(1, 3),
+    )
+
+    assert captured["student"][0, 1] == torch.finfo(torch.float32).min
+    assert captured["student"][0, 3] == torch.finfo(torch.float32).min
+    assert captured["teacher"][0, 1] == torch.finfo(torch.float32).min
+    assert captured["teacher"][0, 3] == torch.finfo(torch.float32).min

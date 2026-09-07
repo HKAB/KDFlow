@@ -6,6 +6,7 @@ import torch
 
 from kdflow.datasets.utils import get_tokenizer_or_processor
 from kdflow.utils.utils import zero_pad_sequences
+from kdflow.utils.structured_output import validate_rollout_regex_outputs
 
 
 class RolloutDataProcessor:
@@ -45,6 +46,10 @@ class RolloutDataProcessor:
         teacher_routing_keys: Optional[List] = None,
     ) -> tuple[List[dict], Dict[str, float]]:
         """Save, tokenize and collate raw rollout outputs."""
+        validate_rollout_regex_outputs(
+            (output["text"] for output in outputs),
+            sampling_params.get("regex"),
+        )
         self._save_rollout_data(stu_prompts, outputs, labels, global_step, mode)
 
         sample_list = [

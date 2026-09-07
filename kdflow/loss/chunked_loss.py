@@ -17,6 +17,7 @@ def chunked_loss(
     reduction: str = "none",
     metric_fns: Optional[Union[Callable, List[Callable]]] = None,
     return_metrics: bool = False,
+    suppress_token_ids: Optional[List[int]] = None,
     **kwargs: Any,
 ):
     """Compute loss chunk by chunk without materializing full logits.
@@ -58,6 +59,16 @@ def chunked_loss(
             has_teacher_logits = True
         else:
             target = label[start:end]
+
+        if has_teacher_logits and suppress_token_ids:
+            valid_ids = [
+                token_id
+                for token_id in suppress_token_ids
+                if token_id < student_logits.shape[-1]
+            ]
+            if valid_ids:
+                student_logits[..., valid_ids] = torch.finfo(student_logits.dtype).min
+                target[..., valid_ids] = torch.finfo(target.dtype).min
 
         chunk_loss = loss_fn(student_logits, target, reduction="none", **kwargs)
         chunk_tokens = chunk_loss.numel()

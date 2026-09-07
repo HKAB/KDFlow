@@ -16,6 +16,11 @@ from kdflow.backend import get_strategy
 from kdflow.arguments import init_args
 from kdflow.utils.distributed_sampler import DistributedSampler
 from kdflow.utils.utils import get_tokenizer, load_custom_eval_fn
+from kdflow.utils.structured_output import (
+    ROLLOUT_REGEX_FILE_ENV,
+    load_rollout_regex,
+)
+from kdflow.utils.token_suppression import KD_SUPPRESS_TOKEN_IDS_ENV
 
 
 def train(args):
@@ -39,6 +44,9 @@ def train(args):
                 "NCCL_DEBUG": "WARN",
             }
         }
+        for env_name in (ROLLOUT_REGEX_FILE_ENV, KD_SUPPRESS_TOKEN_IDS_ENV):
+            if env_name in os.environ:
+                runtime_env["env_vars"][env_name] = os.environ[env_name]
         if args.kd.teacher_mode != "persistent_remote":
             runtime_env["working_dir"] = os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -221,6 +229,13 @@ def train(args):
         "temperature": args.rollout.temperature,
         "top_p": args.rollout.top_p,
     }
+    rollout_regex = load_rollout_regex()
+    if rollout_regex is not None:
+        generate_kwargs["regex"] = rollout_regex
+        strategy.log(
+            "Structured rollout regex enabled from "
+            f"{os.environ[ROLLOUT_REGEX_FILE_ENV]} ({len(rollout_regex)} chars)"
+        )
     
     trainer = OnPolicyKDTrainer(
         strategy=strategy,

@@ -108,6 +108,10 @@ ray start --head --node-ip-address="${NODE_IP}" --port="${RAY_PORT}" \
 ray status --address="${RAY_ADDRESS}" || exit 1
 
 cd "${KDFLOW_SRC}" || exit 1
+if [ ! -s "${KDFLOW_ROLLOUT_REGEX_FILE}" ]; then
+    echo "ERROR: rollout regex file is missing or empty: ${KDFLOW_ROLLOUT_REGEX_FILE}"
+    exit 2
+fi
 IMPORTED_KDFLOW="$(python -c 'import kdflow; print(kdflow.__file__)')" || exit 1
 echo "Imported KDFlow: ${IMPORTED_KDFLOW}"
 case "${IMPORTED_KDFLOW}" in
