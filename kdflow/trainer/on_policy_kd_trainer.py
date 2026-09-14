@@ -5,6 +5,7 @@ from typing import Callable, Dict, Optional
 from collections import defaultdict
 
 import ray
+import torch
 
 from kdflow.trainer.rollout_manager import RolloutManager
 from kdflow.utils.logging_utils import (
@@ -14,6 +15,13 @@ from kdflow.utils.logging_utils import (
     normalize_eval_metrics,
 )
 from kdflow.utils.dynamic_bsz import rearrange_global_batch
+from kdflow.utils.checkpointing import (
+    TRAINER_STATE_FILE,
+    build_checkpoint_invariants,
+    finalize_checkpoint,
+    prepare_checkpoint_directory,
+    prune_checkpoints,
+)
 
 
 logger = init_logger(__name__)
@@ -175,8 +183,45 @@ class OnPolicyKDTrainer:
             all_global_batches.append(global_batch)
         return all_global_batches
     
-    def fit(self, global_step=0, start_epoch=0):
+    def _save_training_checkpoint(self, epoch: int) -> None:
+        checkpoint_path = prepare_checkpoint_directory(
+            self.args.train.ckpt_path, self.global_step
+        )
+        ray.get(self.student.async_save_checkpoint(checkpoint_path))
+
+        trainer_state = {
+            "version": 1,
+            "global_step": self.global_step,
+            "epoch": epoch,
+            "data_loader_state_dict": self.train_dataloader.state_dict(),
+            "invariants": build_checkpoint_invariants(
+                self.args,
+                len(self.train_dataloader.dataset),
+                self.num_rollout_iters_per_epoch,
+                getattr(
+                    self.train_dataloader.dataset.processed_dataset,
+                    "_fingerprint",
+                    None,
+                ),
+            ),
+        }
+        trainer_state_path = os.path.join(checkpoint_path, TRAINER_STATE_FILE)
+        trainer_state_tmp = f"{trainer_state_path}.tmp"
+        torch.save(trainer_state, trainer_state_tmp)
+        os.replace(trainer_state_tmp, trainer_state_path)
+        finalize_checkpoint(self.args.train.ckpt_path, checkpoint_path)
+        prune_checkpoints(
+            self.args.train.ckpt_path, self.args.train.max_checkpoints
+        )
+
+    def fit(
+        self,
+        global_step=0,
+        start_epoch=0,
+        data_loader_resumed=False,
+    ):
         self.global_step = global_step
+        self.start_global_step = global_step
         
         # Print training configuration and initialize loggers
         self._print_training_config()
@@ -200,7 +245,8 @@ class OnPolicyKDTrainer:
         
         for epoch in range(start_epoch, self.epochs):
             self.current_epoch = epoch
-            self.train_dataloader.sampler.set_epoch(epoch)
+            if not (data_loader_resumed and epoch == start_epoch):
+                self.train_dataloader.sampler.set_epoch(epoch)
             
             for prompt_batch in self.train_dataloader:
                 step_start = time.time()
@@ -286,6 +332,16 @@ class OnPolicyKDTrainer:
                     self.log_state["timing/teacher_weight_sync"].append(time.time() - teacher_update_start)
                     if self.teacher_sleep_enabled:
                         self.teacher.sleep(tags=["weights"])
+
+                checkpoint_time = 0.0
+                if self.global_step % self.args.train.save_steps == 0:
+                    self.strategy.log(
+                        f"Saving resumable checkpoint at global step {self.global_step}"
+                    )
+                    checkpoint_start = time.time()
+                    self._save_training_checkpoint(epoch)
+                    checkpoint_time = time.time() - checkpoint_start
+                    self.log_state["timing/checkpoint"].append(checkpoint_time)
                     
                 student_sleep_start = time.time()
                 if self.args.train.enable_sleep:
@@ -294,7 +350,9 @@ class OnPolicyKDTrainer:
                     time.time() - student_sleep_start
                 )
 
-                self.log_state["timing/step_time"].append(time.time() - step_start)
+                self.log_state["timing/step_time"].append(
+                    time.time() - step_start - checkpoint_time
+                )
                 self.logging()
 
                 if (
@@ -304,10 +362,7 @@ class OnPolicyKDTrainer:
                     self.strategy.log(f"Evaluating model at global step {self.global_step}")
                     self.evaluate()
                 
-                if self.global_step % self.args.train.save_steps == 0:
-                    self.strategy.log(f"Saving model at global step {self.global_step}")
-                    save_path = os.path.join(self.args.train.save_path, f"epoch_{epoch + 1}_global_step_{self.global_step}")
-                    ray.get(self.student.async_save_model(save_path))
+            data_loader_resumed = False
         
             # save model after each epoch
             self.strategy.log(f"Saving model after epoch {epoch + 1}")
@@ -368,7 +423,10 @@ class OnPolicyKDTrainer:
     def logging(self):
         if self.global_step % self.args.log.logging_steps == 0:
             progress = self.global_step / self.num_rollout_iters_per_epoch / self.epochs
-            eta = int(time.time() - self.start_time) * (1 - progress) / progress
+            elapsed = time.time() - self.start_time
+            session_steps = max(self.global_step - self.start_global_step, 1)
+            total_steps = self.num_rollout_iters_per_epoch * self.epochs
+            eta = elapsed / session_steps * max(total_steps - self.global_step, 0)
             progress_str = "epoch [{current_epoch}/{total_epoch}], " \
                 "step [{current_step}/{total_step}], " \
                 "train_progress [{progress:.2f}%], " \
@@ -379,7 +437,7 @@ class OnPolicyKDTrainer:
                 current_step=self.global_step, 
                 total_step=self.num_rollout_iters_per_epoch * self.epochs, 
                 progress=progress * 100,
-                elapsed=str(timedelta(seconds=(time.time() - self.start_time))).split(".")[0],
+                elapsed=str(timedelta(seconds=elapsed)).split(".")[0],
                 eta=str(timedelta(seconds=eta)).split(".")[0]
             )
             for k in self.log_state:

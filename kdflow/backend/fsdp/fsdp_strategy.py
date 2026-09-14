@@ -3,6 +3,7 @@ import gc
 import functools
 import logging
 import torch
+import torch.distributed.checkpoint as dcp
 
 import torch.distributed as dist
 import torch.nn as nn
@@ -20,9 +21,12 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
+    get_state_dict,
     set_model_state_dict,
+    set_state_dict,
     StateDictOptions,
 )
+from torch.distributed.checkpoint.stateful import Stateful
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from kdflow.utils.logging_utils import init_logger
@@ -30,6 +34,34 @@ from kdflow.models import DistillModel
 from kdflow.utils.distributed_sampler import DistributedSampler
 from kdflow.models.ring_attn_utils import get_ring_attn_group, set_ring_attn_group
 from kdflow.utils.distributed_util import torch_dist_barrier_and_cuda_sync
+
+
+class _TrainingAppState(Stateful):
+    """DCP adapter for an FSDP2 model, optimizer, and scheduler."""
+
+    def __init__(self, model, optimizer, scheduler):
+        self.model = model
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+
+    def state_dict(self):
+        model_state, optimizer_state = get_state_dict(
+            self.model, self.optimizer
+        )
+        return {
+            "model": model_state,
+            "optimizer": optimizer_state,
+            "scheduler": self.scheduler.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        set_state_dict(
+            self.model,
+            self.optimizer,
+            model_state_dict=state_dict["model"],
+            optim_state_dict=state_dict["optimizer"],
+        )
+        self.scheduler.load_state_dict(state_dict["scheduler"])
 
 
 class FSDP2Strategy(ABC):
@@ -374,6 +406,26 @@ class FSDP2Strategy(ABC):
             if scheduler:
                 scheduler.step()
         return grad_norm
+
+    def save_training_checkpoint(
+        self, model, optimizer, scheduler, checkpoint_path: str
+    ) -> None:
+        """Save sharded training state collectively across all student ranks."""
+        dcp.save(
+            {"app": _TrainingAppState(model, optimizer, scheduler)},
+            checkpoint_id=checkpoint_path,
+        )
+        dist.barrier()
+
+    def load_training_checkpoint(
+        self, model, optimizer, scheduler, checkpoint_path: str
+    ) -> None:
+        """Restore sharded training state collectively across student ranks."""
+        dcp.load(
+            {"app": _TrainingAppState(model, optimizer, scheduler)},
+            checkpoint_id=checkpoint_path,
+        )
+        dist.barrier()
             
     def load_model(self, model: nn.Module, path: str, map_location="cpu", strict: bool = False, key_replace_fn=None) -> None:
         # For FSDP2, we prefer Distributed Checkpoint (DCP)

@@ -2,6 +2,7 @@ import os
 import math
 
 import ray
+import torch
 
 from kdflow.ray.train.multi_teacher_group import MultiTeacherActorGroup
 from kdflow.ray.train.teacher_group import TeacherActorGroup
@@ -21,9 +22,19 @@ from kdflow.utils.structured_output import (
     load_rollout_regex,
 )
 from kdflow.utils.token_suppression import KD_SUPPRESS_TOKEN_IDS_ENV
+from kdflow.utils.checkpointing import (
+    TRAINER_STATE_FILE,
+    build_checkpoint_invariants,
+    resolve_checkpoint_path,
+    validate_resume_metadata,
+)
 
 
 def train(args):
+    checkpoint_path = resolve_checkpoint_path(
+        args.train.ckpt_path, args.train.resume_from_checkpoint
+    )
+    args.train.resume_from_checkpoint = checkpoint_path
     use_lora = args.model.lora_rank > 0
     if use_lora and args.model.student_name_or_path == args.model.teacher_name_or_path:
         raise ValueError("On-policy LoRA does not support self-distillation yet.")
@@ -215,6 +226,39 @@ def train(args):
     num_update_steps_per_rollout = args.rollout.rollout_batch_size * args.rollout.n_samples_per_prompt // args.train.train_batch_size
     max_rollout_iters = math.ceil(args.train.num_epochs * num_rollout_iters_per_epoch)
     strategy.log(f"Max training iterations: {max_rollout_iters}")
+
+    resume_state = None
+    if checkpoint_path:
+        resume_state = torch.load(
+            os.path.join(checkpoint_path, TRAINER_STATE_FILE),
+            map_location="cpu",
+            weights_only=False,
+        )
+        if resume_state.get("version") != 1:
+            raise ValueError(
+                "Unsupported training checkpoint version: "
+                f"{resume_state.get('version')!r}"
+            )
+        validate_resume_metadata(
+            resume_state["invariants"],
+            build_checkpoint_invariants(
+                args,
+                len(train_dataset),
+                num_rollout_iters_per_epoch,
+                getattr(train_dataset.processed_dataset, "_fingerprint", None),
+            ),
+        )
+        if resume_state["epoch"] >= args.train.num_epochs:
+            raise ValueError(
+                f"Checkpoint epoch {resume_state['epoch'] + 1} is outside "
+                f"num_epochs={args.train.num_epochs}"
+            )
+        train_dataloader.sampler.set_epoch(resume_state["epoch"])
+        train_dataloader.load_state_dict(resume_state["data_loader_state_dict"])
+        strategy.log(
+            f"Resuming from {checkpoint_path} at global step "
+            f"{resume_state['global_step']} (epoch {resume_state['epoch'] + 1})"
+        )
     
     # Initialize student model on all workers
     ray.get(student_model.async_init_model_from_pretrained(
@@ -252,7 +296,11 @@ def train(args):
     )
     
     try:
-        trainer.fit()
+        trainer.fit(
+            global_step=resume_state["global_step"] if resume_state else 0,
+            start_epoch=resume_state["epoch"] if resume_state else 0,
+            data_loader_resumed=resume_state is not None,
+        )
         ray.get(student_model.async_save_model())
         strategy.log("Training completed and model saved.")
     finally:

@@ -149,6 +149,8 @@ class StudentRayActor:
             tokenizer_info=tokenizer_info,
         )
 
+        checkpoint_modules = {"student": self.student}
+
         # Register projector parameters into optimizer with separate learning rate
         if hasattr(self.kd_algorithm, 'get_projector_params'):
             projector_params = self.kd_algorithm.get_projector_params()
@@ -168,16 +170,37 @@ class StudentRayActor:
                     scheduler_specific_kwargs={"min_lr": self.args.train.min_lr},
                 )
                 strategy.print(f"Registered {len(projector_params)} projector params into optimizer with lr={projector_lr}")
+                checkpoint_modules["t2s_projector"] = self.kd_algorithm.t2s_projector
+                if hasattr(self.kd_algorithm, "query_projector"):
+                    checkpoint_modules["query_projector"] = self.kd_algorithm.query_projector
 
-        # load checkpoint
-        self.checkpoint_states = {}
-        ckpt_path = self.args.train.ckpt_path
-        if os.path.exists(ckpt_path):
-            strategy.print(f"Loading the checkpoint: {ckpt_path}")
-            _, states = strategy.load_ckpt(self.student.model, ckpt_path)
-            self.checkpoint_states["global_step"] = states["global_step"]
-            self.checkpoint_states["epoch"] = states["epoch"]
-            self.checkpoint_states["data_loader_state_dict"] = states["data_loader_state_dict"]
+        # Give every optimized parameter a stable fully qualified name for DCP.
+        self.checkpoint_model = nn.ModuleDict(checkpoint_modules)
+
+        checkpoint_path = self.args.train.resume_from_checkpoint
+        if checkpoint_path:
+            strategy.print(f"Loading training checkpoint: {checkpoint_path}")
+            strategy.load_training_checkpoint(
+                self.checkpoint_model,
+                self.optim,
+                self.scheduler,
+                checkpoint_path,
+            )
+            actor_state = torch.load(
+                os.path.join(checkpoint_path, f"student_rank_{self._rank:05d}.pt"),
+                map_location="cpu",
+                weights_only=False,
+            )
+            if actor_state.get("version") != 1:
+                raise ValueError(
+                    f"Unsupported student actor checkpoint version: "
+                    f"{actor_state.get('version')!r}"
+                )
+            self.strategy.step = actor_state["gradient_accumulation_step"]
+            if self.ema_state is not None:
+                if actor_state["ema_state"] is None:
+                    raise ValueError("Checkpoint is missing the configured EMA state")
+                self.ema_state = actor_state["ema_state"]
 
         # initial offload
         if self.args.train.enable_sleep:
@@ -406,9 +429,6 @@ class StudentRayActor:
             save_path = self.args.train.save_path
         self.strategy.save_model(self.student, save_path)
 
-    def get_checkpoint_states(self):
-        return self.checkpoint_states
-
     def wakeup(self):
         """Reload optimizer states from CPU to GPU."""
         self.strategy.reload_model_params(self.student)
@@ -427,20 +447,26 @@ class StudentRayActor:
             self.teacher_lm_head = self.teacher_lm_head.cpu()
         self.strategy.offload_model_params(self.student, empty_cache=True)
 
-    def save_checkpoint(self, tag, client_states):
-        self.strategy.save_ckpt(
-            self.student.model,
-            os.path.join(self.args.train.ckpt_path, "_actor"),
-            tag,
-            self.args.train.max_ckpt_num,
-            self.args.train.max_ckpt_mem,
-            client_states,
+    def save_checkpoint(self, checkpoint_path):
+        self.strategy.save_training_checkpoint(
+            self.checkpoint_model,
+            self.optim,
+            self.scheduler,
+            checkpoint_path,
         )
-        if self.save_hf_ckpt:
-            save_path = os.path.join(self.args.train.ckpt_path, f"{tag}_hf")
-            self.strategy.save_model(self.student, save_path)
-        # wait
-        torch_dist_barrier_and_cuda_sync()
+        actor_state_path = os.path.join(
+            checkpoint_path, f"student_rank_{self._rank:05d}.pt"
+        )
+        actor_state_tmp = f"{actor_state_path}.tmp"
+        torch.save(
+            {
+                "version": 1,
+                "gradient_accumulation_step": self.strategy.step,
+                "ema_state": self.ema_state,
+            },
+            actor_state_tmp,
+        )
+        os.replace(actor_state_tmp, actor_state_path)
         
     @torch.no_grad()
     def ema_update(self):

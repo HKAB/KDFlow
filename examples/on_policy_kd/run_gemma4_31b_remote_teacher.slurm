@@ -15,6 +15,14 @@
 #
 # Safe full run:
 #   sbatch examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+# Resume the latest completed checkpoint for the same RUN_TAG:
+#   sbatch --export=ALL,RUN_TAG=dedicated,RESUME_FROM_CHECKPOINT=latest \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+# Server resume smoke test (run the second job after the first finishes):
+#   sbatch --export=ALL,MAX_SAMPLES=192,RUN_TAG=resume-source,SAVE_STEPS=1,MAX_CHECKPOINTS=3 \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
+#   sbatch --export=ALL,MAX_SAMPLES=192,RUN_TAG=resume-copy,SAVE_STEPS=1,MAX_CHECKPOINTS=3,RESUME_FROM_CHECKPOINT=/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-resume-source/checkpoints/step_00000001 \
+#     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
 # Ten-step baseline benchmark (long enough to get past warm-up):
 #   sbatch --export=ALL,MAX_SAMPLES=640,RUN_TAG=bench-safe \
 #     examples/on_policy_kd/run_gemma4_31b_remote_teacher.slurm
@@ -36,7 +44,10 @@ GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
 CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE:-1024}"
 MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU:-12288}"
 LOGGING_STEPS="${LOGGING_STEPS:-10}"
+SAVE_STEPS="${SAVE_STEPS:-500}"
 RUN_TAG="${RUN_TAG:-dedicated}"
+RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
+MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-2}"
 if [ -n "${MAX_SAMPLES}" ]; then
     NUM_EPOCHS="${NUM_EPOCHS:-1}"
 else
@@ -90,7 +101,10 @@ srun --container-image="${CONTAINER}" \
         GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING}" \
         CHUNKED_LOSS_SIZE="${CHUNKED_LOSS_SIZE}" \
         MAX_TOKEN_LEN_PER_GPU="${MAX_TOKEN_LEN_PER_GPU}" \
-        LOGGING_STEPS="${LOGGING_STEPS}" RUN_TAG="${RUN_TAG}" \
+        LOGGING_STEPS="${LOGGING_STEPS}" SAVE_STEPS="${SAVE_STEPS}" \
+        RUN_TAG="${RUN_TAG}" \
+        RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT}" \
+        MAX_CHECKPOINTS="${MAX_CHECKPOINTS}" \
         KDFLOW_RADIX_LOG_INTERVAL=100 \
     bash -s <<'INNER_BASH'
 
@@ -125,6 +139,9 @@ EXTRA_TRAIN_ARGS=()
 if [ -n "${MAX_SAMPLES}" ]; then
     EXTRA_TRAIN_ARGS+=(--max_samples "${MAX_SAMPLES}")
 fi
+if [ -n "${RESUME_FROM_CHECKPOINT}" ]; then
+    EXTRA_TRAIN_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+fi
 
 python -m kdflow.cli.train_kd_on_policy \
     --student_name_or_path "${STUDENT}" \
@@ -157,7 +174,8 @@ python -m kdflow.cli.train_kd_on_policy \
     --logging_steps "${LOGGING_STEPS}" --use_wandb True --wandb_mode offline \
     --wandb_project gemma4-asr-kd --wandb_group 31b-to-e2b-dedicated \
     --wandb_run_name "kdflow-${RUN_TAG}-${SLURM_JOB_ID}" --wandb_dir "${WANDB_DIR}" \
-    --save_steps 500 --eval_steps -1 --ckpt_path "${CKPT}" \
+    --save_steps "${SAVE_STEPS}" --max_checkpoints "${MAX_CHECKPOINTS}" \
+    --eval_steps -1 --ckpt_path "${CKPT}" \
     --save_path "${OUTPUT}" "${EXTRA_TRAIN_ARGS[@]}"
 
 TRAIN_EXIT=$?

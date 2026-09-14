@@ -84,7 +84,16 @@ class TrainingArguments:
         metadata={"help": "Enable reproducible behavior during distributed training."}
     )
     load_checkpoint: bool = field(
-        default=False
+        default=False,
+        metadata={"help": "Deprecated alias for --resume_from_checkpoint latest."}
+    )
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "Training checkpoint directory, or 'latest' under ckpt_path."}
+    )
+    max_checkpoints: int = field(
+        default=2,
+        metadata={"help": "Maximum number of resumable checkpoints to retain."}
     )
     ckpt_path: str = field(
         default="./ckpt/checkpoints_distill"
@@ -141,6 +150,11 @@ class TrainingArguments:
          
         if self.save_steps <= 0:
             self.save_steps = float("inf")
+
+        if self.load_checkpoint and self.resume_from_checkpoint is None:
+            self.resume_from_checkpoint = "latest"
+        if self.max_checkpoints < 1:
+            raise ValueError("max_checkpoints must be at least 1")
         
         if self.eval_steps <= 0:
             self.eval_steps = float("inf")

@@ -131,6 +131,13 @@ class StudentActorGroup:
             List: list of remote object refs.
         """
         return [actor.save_model.remote(save_path) for actor in self._actor_handlers]
+
+    def async_save_checkpoint(self, checkpoint_path):
+        """Save sharded resumable state collectively on all student ranks."""
+        return [
+            actor.save_checkpoint.remote(checkpoint_path)
+            for actor in self._actor_handlers
+        ]
     
     def async_run_distill(self, data, collect_metrics=True):
         """ Send data to each distill worker and run distillation.
