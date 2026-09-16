@@ -23,6 +23,7 @@ from kdflow.utils.structured_output import (
 )
 from kdflow.utils.token_suppression import KD_SUPPRESS_TOKEN_IDS_ENV
 from kdflow.utils.checkpointing import (
+    ROLLOUT_RESUME_MUTABLE_KEYS,
     TRAINER_STATE_FILE,
     build_checkpoint_invariants,
     resolve_checkpoint_path,
@@ -239,7 +240,7 @@ def train(args):
                 "Unsupported training checkpoint version: "
                 f"{resume_state.get('version')!r}"
             )
-        validate_resume_metadata(
+        allowed_rollout_changes = validate_resume_metadata(
             resume_state["invariants"],
             build_checkpoint_invariants(
                 args,
@@ -247,7 +248,18 @@ def train(args):
                 num_rollout_iters_per_epoch,
                 getattr(train_dataset.processed_dataset, "_fingerprint", None),
             ),
+            allowed_mismatch_keys=(
+                ROLLOUT_RESUME_MUTABLE_KEYS
+                if args.train.resume_allow_rollout_config_change
+                else ()
+            ),
         )
+        if allowed_rollout_changes:
+            changes = ", ".join(
+                f"{key}: {old!r} -> {new!r}"
+                for key, (old, new) in sorted(allowed_rollout_changes.items())
+            )
+            strategy.log(f"Resuming with rollout configuration changes: {changes}")
         if resume_state["epoch"] >= args.train.num_epochs:
             raise ValueError(
                 f"Checkpoint epoch {resume_state['epoch'] + 1} is outside "

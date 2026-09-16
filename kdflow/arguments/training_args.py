@@ -91,6 +91,12 @@ class TrainingArguments:
         default=None,
         metadata={"help": "Training checkpoint directory, or 'latest' under ckpt_path."}
     )
+    resume_allow_rollout_config_change: bool = field(
+        default=False,
+        metadata={
+            "help": "Allow only rollout decoding settings to differ when resuming."
+        },
+    )
     max_checkpoints: int = field(
         default=2,
         metadata={"help": "Maximum number of resumable checkpoints to retain."}

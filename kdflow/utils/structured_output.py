@@ -23,12 +23,12 @@ def load_rollout_regex(path: Optional[str] = None) -> Optional[str]:
     return regex.rstrip("\r\n")
 
 
-def validate_rollout_regex_outputs(
+def find_invalid_rollout_regex_outputs(
     outputs: Iterable[str], regex: Optional[str]
-) -> None:
-    """Fail before training if SGLang returns text outside the configured regex."""
+) -> list[int]:
+    """Return indices of outputs that do not fully match the configured regex."""
     if regex is None:
-        return
+        return []
     try:
         pattern = re.compile(regex)
     except re.error as error:
@@ -37,10 +37,23 @@ def validate_rollout_regex_outputs(
             "engine. Refusing to train without structured-output validation."
         ) from error
 
-    for index, output in enumerate(outputs):
-        if pattern.fullmatch(output) is None:
-            preview = output[:200].replace("\n", "\\n")
-            raise RuntimeError(
-                "SGLang returned an output that violates the configured rollout "
-                f"regex (sample={index}, preview={preview!r})."
-            )
+    return [
+        index
+        for index, output in enumerate(outputs)
+        if pattern.fullmatch(output) is None
+    ]
+
+
+def validate_rollout_regex_outputs(
+    outputs: Iterable[str], regex: Optional[str]
+) -> None:
+    """Fail before training if SGLang returns text outside the configured regex."""
+    outputs = list(outputs)
+    invalid_indices = find_invalid_rollout_regex_outputs(outputs, regex)
+    if invalid_indices:
+        index = invalid_indices[0]
+        preview = outputs[index][:200].replace("\n", "\\n")
+        raise RuntimeError(
+            "SGLang returned an output that violates the configured rollout "
+            f"regex (sample={index}, preview={preview!r})."
+        )

@@ -63,3 +63,13 @@ def test_rejects_resume_configuration_mismatch():
         validate_resume_metadata(
             {"student_world_size": 4}, {"student_world_size": 8}
         )
+
+
+def test_allows_only_explicit_resume_configuration_mismatches():
+    mismatches = validate_resume_metadata(
+        {"student_world_size": 4, "temperature": 0.7},
+        {"student_world_size": 4, "temperature": 0.4},
+        allowed_mismatch_keys={"temperature"},
+    )
+
+    assert mismatches == {"temperature": (0.7, 0.4)}

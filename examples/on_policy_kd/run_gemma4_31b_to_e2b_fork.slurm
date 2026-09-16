@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:8
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=2000G
+#SBATCH --mem=1000G
 #SBATCH --output=logs/kdflow-gemma4-31b-e2b-%j.out
 #SBATCH --error=logs/kdflow-gemma4-31b-e2b-%j.err
 
@@ -27,7 +27,7 @@ TEACHER_REPO="/mnt/data/huggingface/hub/models--google--gemma-4-31B-it"
 STUDENT="${STUDENT_REPO}/snapshots/$(cat "${STUDENT_REPO}/refs/main")"
 TEACHER="${TEACHER_REPO}/snapshots/$(cat "${TEACHER_REPO}/refs/main")"
 
-DATA="/mnt/data/users/truongnp5/uv_env/kdflow/data/train.jsonl"
+DATA="/mnt/data/users/truongnp5/uv_env/kdflow/data/tts/train.jsonl"
 HF_CACHE="/mnt/data/users/truongnp5/cache/huggingface"
 HF_DATASETS_CACHE="${HF_CACHE}/datasets"
 OUTPUT="/mnt/data/users/truongnp5/uv_env/kdflow/gemma4-31b-to-e2b-v2"
@@ -90,7 +90,7 @@ srun --nodes=1 --ntasks=1 \
         TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 \
         NCCL_DEBUG=WARN NCCL_IB_DISABLE=0 \
         TRITON_CACHE_DIR="${TRITON_CACHE_DIR}" \
-        KDFLOW_ROLLOUT_REGEX_FILE="/mnt/data/users/truongnp5/uv_env/kdflow/config/asr_rollout.regex" \
+        KDFLOW_ROLLOUT_REGEX_FILE="${KDFLOW_SRC}/examples/on_policy_kd/tts_rollout.regex" \
         KDFLOW_KD_SUPPRESS_TOKEN_IDS="98,100,101" \
         KDFLOW_SRC="${KDFLOW_SRC}" STUDENT="${STUDENT}" TEACHER="${TEACHER}" \
         DATA="${DATA}" OUTPUT="${OUTPUT}" CKPT="${CKPT}" \
@@ -118,9 +118,11 @@ case "${IMPORTED_KDFLOW}" in
 esac
 
 python - <<'PY' || exit 1
+from kdflow.arguments.rollout_args import RolloutArguments
 from kdflow.arguments.training_args import TrainingArguments
 
 assert hasattr(TrainingArguments, "resume_from_checkpoint")
+assert hasattr(RolloutArguments, "rollout_regex_max_retries")
 print("Resumable checkpoint implementation is available.")
 PY
 
@@ -131,7 +133,10 @@ ray status --address="${RAY_ADDRESS}" || exit 1
 
 EXTRA_TRAIN_ARGS=()
 if [ -n "${RESUME_FROM_CHECKPOINT}" ]; then
-    EXTRA_TRAIN_ARGS+=(--resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}")
+    EXTRA_TRAIN_ARGS+=(
+        --resume_from_checkpoint "${RESUME_FROM_CHECKPOINT}"
+        --resume_allow_rollout_config_change True
+    )
 fi
 
 python -m kdflow.cli.train_kd_on_policy \
@@ -142,11 +147,11 @@ python -m kdflow.cli.train_kd_on_policy \
     --fsdp_size -1 --cpu_offload False \
     --train_dataset_path "${DATA}" --input_key messages \
     --apply_chat_template True --preprocess_num_workers 32 \
-    --prompt_max_len 8192 --generate_max_len 256 --max_len 8448 \
+    --prompt_max_len 8192 --generate_max_len 1024 --max_len 9216 \
     --train_batch_size 64 --micro_train_batch_size 1 --num_epochs 2 \
     --use_dynamic_bsz True --max_token_len_per_gpu 12288 \
     --chunked_loss_size 1024 \
-    --learning_rate 1e-6 --min_lr 1e-8 --lr_warmup_ratio 0.05 \
+    --learning_rate 5e-6 --min_lr 1e-8 --lr_warmup_ratio 0.05 \
     --max_norm 1.0 --weight_decay 0.0 --bf16 True \
     --gradient_checkpointing True \
     --kd_algorithm vanilla_kd --kd_loss_fn rkl --kd_ratio 1.0 \
@@ -156,9 +161,10 @@ python -m kdflow.cli.train_kd_on_policy \
     --rollout_num_engines 8 --rollout_tp_size 1 --rollout_batch_size 64 \
     --n_samples_per_prompt 1 --rollout_mem_fraction_static 0.25 \
     --temperature 0.7 --top_p 0.95 --print_rollout_sample False \
+    --rollout_regex_max_retries 2 --rollout_regex_retry_temperature 0.4 \
     --enable_sleep True \
     --logging_steps 5 --use_wandb True --wandb_mode offline \
-    --wandb_project gemma4-asr-kd --wandb_group 31b-to-e2b \
+    --wandb_project gemma4-tts-kd --wandb_group 31b-to-e2b \
     --wandb_run_name "kdflow-${SLURM_JOB_ID}" --wandb_dir "${WANDB_DIR}" \
     --save_steps "${SAVE_STEPS}" --max_checkpoints "${MAX_CHECKPOINTS}" \
     --eval_steps -1 --ckpt_path "${CKPT}" --save_path "${OUTPUT}" \

@@ -11,6 +11,16 @@ from kdflow.utils.token_suppression import load_kd_suppress_token_ids
 CHECKPOINT_SUCCESS_FILE = "_SUCCESS"
 LATEST_CHECKPOINT_FILE = "latest"
 TRAINER_STATE_FILE = "trainer_state.pt"
+ROLLOUT_RESUME_MUTABLE_KEYS = frozenset(
+    {
+        "generate_max_len",
+        "temperature",
+        "top_p",
+        "rollout_regex_sha256",
+        "rollout_regex_max_retries",
+        "rollout_regex_retry_temperature",
+    }
+)
 
 
 def build_checkpoint_invariants(
@@ -60,6 +70,10 @@ def build_checkpoint_invariants(
         "generate_max_len": args.rollout.generate_max_len,
         "temperature": args.rollout.temperature,
         "top_p": args.rollout.top_p,
+        "rollout_regex_max_retries": args.rollout.rollout_regex_max_retries,
+        "rollout_regex_retry_temperature": (
+            args.rollout.rollout_regex_retry_temperature
+        ),
         "rollout_regex_sha256": (
             hashlib.sha256(rollout_regex.encode("utf-8")).hexdigest()
             if rollout_regex is not None
@@ -142,16 +156,29 @@ def prune_checkpoints(checkpoint_root: str, keep: int) -> None:
         shutil.rmtree(checkpoint)
 
 
-def validate_resume_metadata(saved: dict, expected: dict) -> None:
+def validate_resume_metadata(
+    saved: dict, expected: dict, allowed_mismatch_keys=()
+) -> dict:
     """Reject topology/data changes that would make continuation ambiguous."""
     mismatches = {
         key: (saved.get(key), value)
         for key, value in expected.items()
         if saved.get(key) != value
     }
-    if mismatches:
+    allowed_mismatch_keys = set(allowed_mismatch_keys)
+    fatal_mismatches = {
+        key: value
+        for key, value in mismatches.items()
+        if key not in allowed_mismatch_keys
+    }
+    if fatal_mismatches:
         details = ", ".join(
             f"{key}: saved={old!r}, current={new!r}"
-            for key, (old, new) in sorted(mismatches.items())
+            for key, (old, new) in sorted(fatal_mismatches.items())
         )
         raise ValueError(f"Checkpoint configuration mismatch: {details}")
+    return {
+        key: value
+        for key, value in mismatches.items()
+        if key in allowed_mismatch_keys
+    }

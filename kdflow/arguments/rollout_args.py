@@ -46,7 +46,23 @@ class RolloutArguments:
         default=2048,
         metadata={"help": "Max generation tokens during rollout."}
     )
+    rollout_regex_max_retries: int = field(
+        default=2,
+        metadata={"help": "Retries for outputs that do not fully match the rollout regex."},
+    )
+    rollout_regex_retry_temperature: float = field(
+        default=0.4,
+        metadata={"help": "Sampling temperature used for invalid structured-output retries."},
+    )
     print_rollout_sample: bool = field(
         default=False,
         metadata={"help": "Whether to print a rollout sample after each rollout."}
     )
+
+    def __post_init__(self):
+        if self.rollout_regex_max_retries < 0:
+            raise ValueError("rollout_regex_max_retries must be non-negative")
+        if self.rollout_regex_retry_temperature <= 0:
+            raise ValueError(
+                "rollout_regex_retry_temperature must be greater than zero"
+            )

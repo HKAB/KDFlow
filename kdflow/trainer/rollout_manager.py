@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from kdflow.trainer.data_processor import RolloutDataProcessor
 from kdflow.utils.logging_utils import init_logger
+from kdflow.utils.structured_output import find_invalid_rollout_regex_outputs
 
 logger = init_logger(__name__)
 
@@ -32,6 +33,12 @@ class RolloutManager:
 
         self.data_processor = RolloutDataProcessor(strategy, is_same_tokenizer)
         self.image_key = self.data_processor.image_key
+        self.dp_size = (
+            self.args.train.num_nodes * self.args.train.num_gpus_per_node
+        ) // self.args.model.ring_attn_size
+        self.train_sample_alignment = (
+            self.dp_size * self.args.train.micro_train_batch_size
+        )
 
     def rollout(
         self,
@@ -92,6 +99,52 @@ class RolloutManager:
                 sampling_params,
                 image_data=images,
             )
+            outputs, invalid_indices, structured_metrics = (
+                self._retry_invalid_structured_outputs(
+                    stu_prompts,
+                    outputs,
+                    sampling_params,
+                    image_data=images,
+                )
+            )
+
+            valid_indices = [
+                index
+                for index in range(len(outputs))
+                if index not in invalid_indices
+            ]
+            valid_before_alignment = len(valid_indices)
+            if mode == "train":
+                usable_count = (
+                    len(valid_indices)
+                    // self.train_sample_alignment
+                    * self.train_sample_alignment
+                )
+                valid_indices = valid_indices[:usable_count]
+            if not valid_indices:
+                raise RuntimeError(
+                    "No valid structured rollout samples remain after retries"
+                )
+
+            def select(values):
+                if values is None:
+                    return None
+                return [values[index] for index in valid_indices]
+
+            total_outputs = len(outputs)
+            outputs = select(outputs)
+            stu_prompts = select(stu_prompts)
+            tea_prompts = select(tea_prompts)
+            labels = select(labels)
+            images = select(images)
+            teacher_routing_keys = select(teacher_routing_keys)
+            structured_metrics["structured_output/dropped_ratio"] = (
+                total_outputs - len(outputs)
+            ) / total_outputs
+            structured_metrics["structured_output/dp_alignment_drop_ratio"] = (
+                valid_before_alignment - len(outputs)
+            ) / total_outputs
+
             micro_batches, rollout_metrics = self.data_processor.process(
                 stu_prompts=stu_prompts,
                 tea_prompts=tea_prompts,
@@ -104,10 +157,92 @@ class RolloutManager:
                 teacher_routing_keys=teacher_routing_keys,
             )
             rollout_metrics.update(timing_metrics)
+            rollout_metrics.update(structured_metrics)
             return micro_batches, rollout_metrics
         finally:
             if should_sleep:
                 self.rollout_group.sleep()
+
+    def _retry_invalid_structured_outputs(
+        self,
+        prompts: List[str],
+        outputs: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+        image_data: Optional[List] = None,
+    ) -> tuple[List[Dict[str, Any]], set[int], Dict[str, float]]:
+        """Retry regex-invalid samples and return any persistent failures."""
+        regex = sampling_params.get("regex")
+        initial_invalid = find_invalid_rollout_regex_outputs(
+            (output["text"] for output in outputs), regex
+        )
+        invalid_indices = set(initial_invalid)
+        retry_requests = 0
+        retry_start = time.perf_counter()
+
+        retry_params = dict(sampling_params)
+        base_temperature = float(retry_params.get("temperature", 0.0))
+        retry_temperature = self.args.rollout.rollout_regex_retry_temperature
+        retry_params["temperature"] = (
+            min(base_temperature, retry_temperature)
+            if base_temperature > 0
+            else retry_temperature
+        )
+
+        for attempt in range(self.args.rollout.rollout_regex_max_retries):
+            if not invalid_indices:
+                break
+            retry_indices = sorted(invalid_indices)
+            retry_requests += len(retry_indices)
+            logger.warning(
+                "Retrying %d regex-invalid rollout samples (attempt %d/%d)",
+                len(retry_indices),
+                attempt + 1,
+                self.args.rollout.rollout_regex_max_retries,
+            )
+            retry_outputs, _ = self._generate(
+                [prompts[index] for index in retry_indices],
+                retry_params,
+                image_data=(
+                    [image_data[index] for index in retry_indices]
+                    if image_data is not None
+                    else None
+                ),
+            )
+            for index, retry_output in zip(retry_indices, retry_outputs):
+                outputs[index] = retry_output
+            invalid_indices = set(
+                find_invalid_rollout_regex_outputs(
+                    (output["text"] for output in outputs), regex
+                )
+            )
+
+        if invalid_indices:
+            details = []
+            for index in sorted(invalid_indices)[:5]:
+                output = outputs[index]
+                finish_reason = output.get("meta_info", {}).get("finish_reason")
+                details.append(
+                    f"{index}:tokens={len(output.get('output_ids', []))},"
+                    f"finish={finish_reason!r}"
+                )
+            logger.warning(
+                "Skipping %d persistently invalid rollout samples (%s)",
+                len(invalid_indices),
+                "; ".join(details),
+            )
+
+        total = len(outputs)
+        recovered = len(initial_invalid) - len(invalid_indices)
+        metrics = {
+            "structured_output/initial_invalid_ratio": len(initial_invalid) / total,
+            "structured_output/recovered_ratio": recovered / total,
+            "structured_output/persistent_invalid_ratio": (
+                len(invalid_indices) / total
+            ),
+            "structured_output/retry_requests": float(retry_requests),
+            "timing/structured_output_retry": time.perf_counter() - retry_start,
+        }
+        return outputs, invalid_indices, metrics
 
     def _generate(
         self,
