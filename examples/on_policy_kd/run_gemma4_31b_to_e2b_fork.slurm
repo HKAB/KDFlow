@@ -36,7 +36,7 @@ WANDB_DIR="${OUTPUT}/wandb"
 TRITON_CACHE_DIR="/tmp/${USER}/triton-${SLURM_JOB_ID}"
 
 RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
-SAVE_STEPS="${SAVE_STEPS:-1000}"
+SAVE_STEPS="${SAVE_STEPS:-250}"
 MAX_CHECKPOINTS="${MAX_CHECKPOINTS:-2}"
 
 mkdir -p logs "${OUTPUT}" "${WANDB_DIR}" "${HF_DATASETS_CACHE}" \
@@ -151,7 +151,7 @@ python -m kdflow.cli.train_kd_on_policy \
     --train_batch_size 64 --micro_train_batch_size 1 --num_epochs 2 \
     --use_dynamic_bsz True --max_token_len_per_gpu 12288 \
     --chunked_loss_size 1024 \
-    --learning_rate 5e-6 --min_lr 1e-8 --lr_warmup_ratio 0.05 \
+    --learning_rate 1e-6 --min_lr 1e-8 --lr_warmup_ratio 0.05 \
     --max_norm 1.0 --weight_decay 0.0 --bf16 True \
     --gradient_checkpointing True \
     --kd_algorithm vanilla_kd --kd_loss_fn rkl --kd_ratio 1.0 \

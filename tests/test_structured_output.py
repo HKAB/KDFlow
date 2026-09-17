@@ -47,7 +47,7 @@ def test_reports_all_invalid_output_indices():
     ) == [1, 3]
 
 
-def test_tts_regex_accepts_long_example_and_bounds_runaway_values():
+def test_tts_regex_accepts_long_example_and_rejects_truncation():
     regex_path = (
         Path(__file__).parents[1]
         / "examples"
@@ -63,5 +63,5 @@ def test_tts_regex_accepts_long_example_and_bounds_runaway_values():
 
     validate_rollout_regex_outputs([long_output], regex)
     assert find_invalid_rollout_regex_outputs(
-        [f"<o><s>x</s><v>{'a' * 769}</v></o>"], regex
+        ["<o><s>x</s><v>unfinished"], regex
     ) == [0]

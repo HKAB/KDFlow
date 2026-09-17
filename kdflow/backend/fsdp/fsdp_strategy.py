@@ -392,6 +392,7 @@ class FSDP2Strategy(ABC):
         **kwargs,
     ):
         grad_norm = None
+        self.optimizer_step_skipped = False
         if self.step == 0:
             if self.max_norm > 0.0:
                 if hasattr(model, "clip_grad_norm_"):
@@ -400,6 +401,27 @@ class FSDP2Strategy(ABC):
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         model.parameters(), self.max_norm
                     )
+
+            gradients_are_finite = (
+                grad_norm is None or bool(torch.isfinite(grad_norm).all().item())
+            )
+            if dist.is_initialized():
+                finite_flag = torch.tensor(
+                    int(gradients_are_finite),
+                    device=torch.cuda.current_device(),
+                    dtype=torch.int32,
+                )
+                dist.all_reduce(finite_flag, op=dist.ReduceOp.MIN)
+                gradients_are_finite = bool(finite_flag.item())
+            if not gradients_are_finite:
+                self.optimizer_step_skipped = True
+                optimizer.zero_grad()
+                logger.warning(
+                    "Skipping optimizer and scheduler step because gradient "
+                    "norm is non-finite: %s",
+                    grad_norm,
+                )
+                return grad_norm
             
             optimizer.step()
             optimizer.zero_grad()

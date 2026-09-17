@@ -122,9 +122,21 @@ class RolloutManager:
                 )
                 valid_indices = valid_indices[:usable_count]
             if not valid_indices:
-                raise RuntimeError(
-                    "No valid structured rollout samples remain after retries"
+                total_outputs = len(outputs)
+                structured_metrics["structured_output/dropped_ratio"] = 1.0
+                structured_metrics["structured_output/dp_alignment_drop_ratio"] = (
+                    valid_before_alignment / total_outputs
                 )
+                structured_metrics["structured_output/skipped_step"] = 1.0
+                timing_metrics.update(structured_metrics)
+                logger.warning(
+                    "Skipping rollout training step: only %d/%d valid samples "
+                    "remain, fewer than the required alignment of %d",
+                    valid_before_alignment,
+                    total_outputs,
+                    self.train_sample_alignment,
+                )
+                return [], timing_metrics
 
             def select(values):
                 if values is None:
@@ -144,6 +156,7 @@ class RolloutManager:
             structured_metrics["structured_output/dp_alignment_drop_ratio"] = (
                 valid_before_alignment - len(outputs)
             ) / total_outputs
+            structured_metrics["structured_output/skipped_step"] = 0.0
 
             micro_batches, rollout_metrics = self.data_processor.process(
                 stu_prompts=stu_prompts,

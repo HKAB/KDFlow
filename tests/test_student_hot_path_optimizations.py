@@ -76,6 +76,24 @@ def test_optimizer_step_returns_the_single_clipped_gradient_norm():
     assert strategy.optimizer_step(optimizer, model, scheduler=None) is None
 
 
+def test_optimizer_step_rejects_nonfinite_gradient_without_changing_weights():
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    strategy = FSDP2Strategy.__new__(FSDP2Strategy)
+    strategy.step = 0
+    strategy.max_norm = 1.0
+    model.weight.grad = torch.full_like(model.weight, float("inf"))
+    model.bias.grad = torch.zeros_like(model.bias)
+    original_weight = model.weight.detach().clone()
+
+    grad_norm = strategy.optimizer_step(optimizer, model, scheduler=None)
+
+    assert not torch.isfinite(grad_norm)
+    assert strategy.optimizer_step_skipped
+    torch.testing.assert_close(model.weight, original_weight)
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
 def test_chunked_kd_loss_suppresses_configured_logits():
     from kdflow.loss.chunked_loss import chunked_loss
 

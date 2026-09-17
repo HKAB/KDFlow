@@ -368,7 +368,17 @@ class StudentRayActor:
             if grad_norm is not None:
                 status["train/grad_norm"].append(grad_norm.item())
 
-            if self.args.kd.use_ema_teacher and self.strategy.step == 0:
+            optimizer_step_skipped = self.strategy.optimizer_step_skipped
+            if self.strategy.step == 0:
+                status["train/nonfinite_update_skipped"].append(
+                    float(optimizer_step_skipped)
+                )
+
+            if (
+                self.args.kd.use_ema_teacher
+                and self.strategy.step == 0
+                and not optimizer_step_skipped
+            ):
                 self.ema_update()
 
             if "response_length" in micro_batch:

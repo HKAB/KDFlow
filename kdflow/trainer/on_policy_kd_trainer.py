@@ -264,6 +264,13 @@ class OnPolicyKDTrainer:
                 for name, value in rollout_metrics.items():
                     self.log_state[name].append(value)
 
+                if not rollout_samples:
+                    self.log_state["timing/step_time"].append(
+                        time.time() - step_start
+                    )
+                    self.logging()
+                    continue
+
                 all_global_batches = self._prepare_global_batches(rollout_samples, num_micro_batches)
 
                 teacher_start = time.time()
